@@ -7,6 +7,7 @@ import re
 from rapidfuzz import fuzz
 
 from app.ingest import norm
+from app.numwords import word_numbers
 from app.schemas import Answer, Document, Status, TraceStep
 
 NUM_RE = re.compile(r"\d+(?:[   ]\d{3})*(?:[.,]\d+)?")
@@ -20,6 +21,17 @@ def numbers(s: str) -> list[float]:
         except ValueError:
             pass
     return out
+
+
+YEARS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\([^)]{1,30}\)\s*)?(?:год\w*|лет)\b", re.I)
+
+
+def number_pool(text: str) -> list[float]:
+    """Все числа фрагмента: цифрами, словами («пятидесяти тысяч»), и сроки в годах, пересчитанные в месяцы."""
+    pool = numbers(text) + word_numbers(text)
+    for m in YEARS_RE.finditer(text or ""):
+        pool.append(float(m.group(1).replace(",", ".")) * 12)
+    return pool
 
 
 def quote_exists(quote: str, docs: list[Document]) -> Document | None:
@@ -83,7 +95,7 @@ def guard(ans: Answer, docs: list[Document], question: str = "") -> Answer:
 
     # Число из ответа должно встречаться в цитате — кроме вопросов-расчётов («сколько рублей составит»).
     is_calc = "составит" in question.lower()
-    a_nums, q_nums = numbers(ans.answer), numbers(nearby(ans.quote, docs, ans.file))
+    a_nums, q_nums = numbers(ans.answer), number_pool(nearby(ans.quote, docs, ans.file))
     if a_nums and not is_calc and ans.status == Status.ANSWER:
         if not any(abs(a - q) < 0.01 for a in a_nums for q in q_nums):
             ans.trace.append(TraceStep(node="guard_number", ok=False, message="числа из ответа нет рядом с цитатой",

@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 
 from app.ingest import norm
 from app.schemas import Document
-from app.verify import nearby, numbers, quote_exists, snap_quote
+from app.numwords import word_numbers
+from app.verify import nearby, number_pool, numbers, quote_exists, snap_quote
 
 
 @dataclass
@@ -141,12 +142,12 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
     if not a_nums:
         return []
     around = nearby(d.quote, docs, d.file)
-    pool = numbers(around) + numbers(_words_to_digits(around))
+    pool = number_pool(around)
     if d.status == "расхождение":
         for e in d.evidence:
             if quote_exists(e.get("quote", ""), docs):
                 ev = nearby(e["quote"], docs, e.get("file", ""))
-                pool += numbers(ev) + numbers(_words_to_digits(ev))
+                pool += number_pool(ev)
     missing = [a for a in a_nums if not any(abs(a - p) < 0.01 for p in pool)]
     if missing and d.status == "расхождение":
         return [Issue("number", f"для значений {missing} нет подтверждающей цитаты — добавь в evidence "
@@ -347,9 +348,6 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".") if v % 1 else str(int(v))
 
 
-_WORD_NUMS = {"один": 1, "одного": 1, "двух": 2, "два": 2, "трёх": 3, "трех": 3, "три": 3, "четырёх": 4, "пяти": 5,
-              "десяти": 10, "двенадцати": 12, "двадцати": 20, "тридцати": 30}
-
-
 def _words_to_digits(s: str) -> str:
-    return " ".join(str(_WORD_NUMS.get(w.lower(), w)) for w in re.findall(r"\S+", s or ""))
+    """Для совместимости: числа словами как строка цифр (используется в разборе сроков)."""
+    return " ".join(str(int(v)) if float(v).is_integer() else str(v) for v in word_numbers(s))

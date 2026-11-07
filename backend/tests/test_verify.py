@@ -32,3 +32,12 @@ def test_number_not_in_quote():
 def test_good_answer_passes():
     a = Answer(id="x", status=Status.ANSWER, answer="18000", quote="что составляет 18 000,00 рублей", file="01.txt")
     assert guard(a, [DOC], "Какой размер обеспечения заявки?").status == Status.ANSWER
+
+
+def test_guard_accepts_words_and_years():
+    d = Document(package="P", file="01.txt", encoding="utf-8",
+                 text="Обеспечение заявки в размере пятидесяти тысяч рублей. Гарантийный срок 2 (два) года.")
+    a = Answer(id="x", status=Status.ANSWER, answer="50000", quote="в размере пятидесяти тысяч рублей", file="01.txt")
+    assert guard(a, [d], "Размер обеспечения заявки?").status == Status.ANSWER
+    b = Answer(id="y", status=Status.ANSWER, answer="24", quote="Гарантийный срок 2 (два) года", file="01.txt")
+    assert guard(b, [d], "Гарантийный срок, в месяцах?").status == Status.ANSWER

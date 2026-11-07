@@ -313,3 +313,12 @@ def test_timeouts_are_not_retried_forever(monkeypatch):
     with pytest.raises(APITimeoutError):
         asyncio.run(llm.call(hang))
     assert n["c"] == 3
+
+
+def test_number_in_words_and_years_to_months():
+    docs = [doc("01.txt", "Обеспечение заявки предоставляется в размере пятидесяти тысяч рублей.\n"
+                          "Гарантийный срок составляет 2 (два) года.\n")]
+    ok = lambda q, a, quote: run_critics(Draft(status="ответ", answer=a, quote=quote, file="01.txt"), docs, q)
+    assert ok("Какой размер обеспечения заявки, в рублях?", "50000", "в размере пятидесяти тысяч рублей") == []
+    assert ok("Какой гарантийный срок, в месяцах?", "24", "2 (два) года") == []
+    assert [i.critic for i in ok("Гарантийный срок, в месяцах?", "36", "2 (два) года")] == ["number"]
