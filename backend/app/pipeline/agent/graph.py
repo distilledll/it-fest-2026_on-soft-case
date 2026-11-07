@@ -32,6 +32,7 @@ class State(TypedDict, total=False):
     draft: Draft | None
     issues: list[Issue]
     warned: list[str]          # по каким warn уже был повтор — второй раз не дёргаем
+    pending_warns: list[Issue] # повторный warn, на который модель не отреагировала
     critic_ok: bool
     attempts: int
     llm_calls: int
@@ -94,14 +95,19 @@ async def check(state: State, config) -> dict:
     enabled = _opt(ctx, "critics", list(CRITICS))
     issues = run_critics(d, docs, state["question"], enabled)
     # warn — один повтор на критика; если модель настаивает, оставляем её решение
-    issues = [i for i in issues if i.severity == "error" or i.critic not in state["warned"]]
-    warned = state["warned"] + [i.critic for i in issues if i.severity == "warn"]
+    fresh = [i for i in issues if i.severity == "error" or i.critic not in state["warned"]]
+    warned = state["warned"] + [i.critic for i in fresh if i.severity == "warn"]
+    # повторные warn не гоняют модель снова, но запоминаются: если ответ так и сдаётся — finalize решит
+    stale_warns = [i for i in issues if i not in fresh]
+    issues = fresh
     steps = [TraceStep(node=f"critic_{i.critic}", ok=False, message=i.message,
                        data={"severity": i.severity, **i.data}) for i in issues]
     if not issues:
-        steps = [TraceStep(node="check", ok=True, message=f"проверки кодом пройдены ({', '.join(enabled)})",
-                           data={"draft": d.__dict__})]
-    return {"issues": issues, "warned": warned, "draft": d, "trace": steps}
+        msg = f"проверки кодом пройдены ({', '.join(enabled)})"
+        if stale_warns:
+            msg += "; модель настаивает вопреки: " + ", ".join(i.critic for i in stale_warns)
+        steps = [TraceStep(node="check", ok=not stale_warns, message=msg, data={"draft": d.__dict__})]
+    return {"issues": issues, "warned": warned, "draft": d, "trace": steps, "pending_warns": stale_warns}
 
 
 async def llm_critic(state: State, config) -> dict:
@@ -112,7 +118,7 @@ async def llm_critic(state: State, config) -> dict:
     prof = ctx.model("critic")
     raw = await llm.chat(prof, json=True, messages=[{"role": "user", "content": prompts.CRITIC.format(
         question=state["question"], status=d.status, answer=d.answer, file=d.file, quote=d.quote,
-        around=_around(d, docs))}])
+        calc=d.calc or "—", around=_around(d, docs), evidence=_evidence_text(d, docs))}])
     calls = state["llm_calls"] + 1
     try:
         j = llm.parse_json(raw)
@@ -134,7 +140,9 @@ async def retry(state: State, config) -> dict:
 
 async def finalize(state: State, config) -> dict:
     d = state.get("draft")
-    errors = [i for i in state.get("issues", []) if i.severity == "error"]
+    # warn по расхождению, оставшийся после исчерпания попыток, — тоже не сдаём: пропущенное расхождение = обман
+    errors = [i for i in state.get("issues", []) + state.get("pending_warns", [])
+              if i.severity == "error" or i.critic in ("conflict", "crosscheck")]
     if d is None or errors:
         why = "; ".join(i.message for i in errors)[:300] or "нет корректного ответа"
         return {"final": Draft(status="не знаю"),
@@ -185,6 +193,12 @@ def _evidence(raw) -> list[dict]:
         if isinstance(e, dict):
             out.append({k: "" if e.get(k) is None else str(e.get(k)) for k in ("file", "quote", "value")})
     return out
+
+
+def _evidence_text(d: Draft, docs: list[Document]) -> str:
+    from app.verify import quote_exists
+    rows = [f"- {e['file']}: «{e['quote']}» → {e['value']}" for e in d.evidence if quote_exists(e["quote"], docs)]
+    return "\n".join(rows) or "(не приведены)"
 
 
 def _around(d: Draft, docs: list[Document], width: int = 400) -> str:

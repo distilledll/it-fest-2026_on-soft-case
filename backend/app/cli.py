@@ -47,11 +47,15 @@ def main():
     r.add_argument("--role", action="append", default=[], metavar="ROLE=PROFILE",
                    help="переопределить модель, напр. --role answer=gpt --role critic=small")
     r.add_argument("--out", type=Path, help="куда дополнительно скопировать answers.csv")
+    r.add_argument("--concurrency", type=int, help="параллельных запросов к API (по лимиту ключа); "
+                                                   "влияет только на скорость")
     sub.add_parser("runs")
     sub.add_parser("models")
     a = ap.parse_args()
 
     if a.cmd == "run":
+        if a.concurrency:
+            settings.llm_concurrency = settings.max_concurrency = a.concurrency
         roles = dict(x.split("=", 1) for x in a.role)
         did = _dataset(a.data)
         meta = asyncio.run(run_set(did, a.pipeline, a.label, not a.no_guard, roles or None))

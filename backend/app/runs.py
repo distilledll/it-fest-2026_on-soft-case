@@ -49,6 +49,7 @@ def _meta(run_id: str, dataset_id: str, pipeline_name: str, label: str, use_guar
         "run_id": run_id, "label": label, "dataset": dataset_id, "pipeline": pipeline_name, "guard": use_guard,
         "models": {r: {"profile": p.id, "model": p.model, "temperature": p.temperature} for r, p in ctx.models.items()},
         "options": ctx.options, "status": "running",
+        "llm_concurrency": settings.llm_concurrency, "max_concurrency": settings.max_concurrency,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 

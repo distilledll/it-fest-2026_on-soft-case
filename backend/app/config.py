@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     max_concurrency: int = 2        # сколько вопросов прогона обрабатываются одновременно
     llm_concurrency: int = 1        # сколько запросов к API одновременно (лимит шлюза на организацию)
     llm_retries: int = 8            # повторы на 429/5xx/сетевых ошибках
-    llm_timeout_s: float = 120.0    # таймаут одного запроса к API
-    question_timeout_s: float = 900.0   # на весь вопрос, включая ожидание очереди и повторы
+    llm_timeout_s: float = 90.0     # таймаут одного запроса к API
+    question_timeout_s: float = 600.0   # на весь вопрос, включая ожидание очереди и повторы
     max_upload_mb: int = 200
 
     @property

@@ -259,3 +259,57 @@ def test_rate_limit_retry(monkeypatch):
     monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
     assert asyncio.run(llm.call(flaky)) == "ok"
     assert sleeps == [4.5, 4.5] and n["calls"] == 3
+
+
+def test_unresolved_conflict_at_budget_end_is_unknown(monkeypatch):
+    """Модель трижды отвечает одним значением при явном расхождении — не сдаём, «не знаю»."""
+    one = {"status": "ответ", "answer": "60", "quote": "в течение 60 календарных дней", "file": "01_izveshchenie.txt"}
+    script(monkeypatch, [one, one, one])
+    ctx = Context(models=CTX.models, options={"llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(
+        Question(id="x", package="T", question="Какой срок выполнения работ, в календарных днях?"), DOCS, ctx))
+    assert a.status == Status.UNKNOWN
+
+
+def test_model_resolves_conflict_after_hint(monkeypatch):
+    script(monkeypatch, [
+        {"status": "ответ", "answer": "60", "quote": "в течение 60 календарных дней", "file": "01_izveshchenie.txt"},
+        {"status": "расхождение", "answer": "60 и 75", "quote": "в течение 60 календарных дней",
+         "file": "01_izveshchenie.txt",
+         "evidence": [{"file": "01_izveshchenie.txt", "quote": "в течение 60 календарных дней", "value": "60"},
+                      {"file": "04_proekt_kontrakta.txt", "quote": "семьдесят пять (75) календарных дней", "value": "75"}]},
+    ])
+    ctx = Context(models=CTX.models, options={"llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(
+        Question(id="x", package="T", question="Какой срок выполнения работ, в календарных днях?"), DOCS, ctx))
+    assert a.status == Status.CONFLICT and a.answer == "60 и 75"
+
+
+def test_critic_sees_evidence_and_calc(monkeypatch):
+    calls = script(monkeypatch, [
+        {"status": "ответ", "answer": "90000", "quote": "5 % от цены контракта", "file": "01_izveshchenie.txt",
+         "calc": "1800000 * 5 / 100",
+         "evidence": [{"file": "01_izveshchenie.txt", "quote": "цена контракта: 1 800 000,00 руб", "value": "1800000"}]},
+        {"ok": True}])
+    a = run("Сколько рублей составит обеспечение исполнения контракта, если контракт заключат по НМЦК?")
+    assert a.status == Status.ANSWER and a.answer == "90000"
+    critic_prompt = calls[1][0]["content"]
+    assert "1800000 * 5 / 100" in critic_prompt and "1 800 000,00" in critic_prompt
+
+
+def test_timeouts_are_not_retried_forever(monkeypatch):
+    import httpx
+    from openai import APITimeoutError
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(llm.asyncio, "sleep", no_sleep)
+    n = {"c": 0}
+
+    async def hang():
+        n["c"] += 1
+        raise APITimeoutError(request=httpx.Request("POST", "http://x"))
+
+    with pytest.raises(APITimeoutError):
+        asyncio.run(llm.call(hang))
+    assert n["c"] == 3

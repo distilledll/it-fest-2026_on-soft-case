@@ -198,7 +198,11 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
     if d.status == "расхождение":
         a_nums = set(numbers(d.answer))
         if len(a_nums) < 2:
-            return [Issue("conflict", "при расхождении в answer должны быть оба значения")]
+            return [Issue("conflict",
+                          "расхождение — это когда ОДИН И ТОТ ЖЕ параметр (срок, сумма, процент, дата) в разных файлах "
+                          "имеет разные значения, например «60 и 75». Если упоминания про разные требования или одно из "
+                          "них — отрицание («не установлено»), это не расхождение: ответь статусом «ответ». "
+                          "Если расхождение есть — в answer должны быть оба значения цифрами")]
         if live and len(distinct) < 2:
             return [Issue("conflict", "найденные упоминания совпадают — расхождения нет, проверь ещё раз",
                           severity="warn")]

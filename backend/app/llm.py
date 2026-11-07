@@ -6,6 +6,7 @@ api_key в файле допустим (storage/ в .gitignore), но наруж
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -16,6 +17,8 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalSer
 from pydantic import BaseModel, Field
 
 from app.config import settings
+
+log = logging.getLogger("llm")
 
 ROLES = ("answer", "critic", "embed", "rerank")
 
@@ -131,18 +134,23 @@ def _slot() -> asyncio.Semaphore:
 
 
 async def call(fn, *args, **kw):
-    """Вызов API с общим лимитом параллельности и повторами на 429/5xx/сетевых ошибках."""
-    delay = 2.0
+    """Вызов API с общим лимитом параллельности и повторами.
+    429 — до llm_retries раз (это просто очередь); тайм-ауты/5xx/сеть — не больше 2 раз,
+    иначе один зависший вопрос держит прогон десятки минут."""
+    delay, slow_fails = 2.0, 0
     for attempt in range(settings.llm_retries + 1):
         async with _slot():
             try:
                 return await fn(*args, **kw)
             except RETRYABLE as e:
-                if attempt == settings.llm_retries:
+                rate_limited = isinstance(e, RateLimitError)
+                slow_fails += not rate_limited
+                if attempt == settings.llm_retries or slow_fails > 2:
                     raise
                 m = RETRY_AFTER_RE.search(str(e))
                 wait = float(m.group(1)) + 0.5 if m else delay
                 delay = min(delay * 2, 30)
+                log.warning("LLM %s, повтор %d через %.1f с", type(e).__name__, attempt + 1, wait)
         await asyncio.sleep(wait)   # ждём вне семафора — слот свободен для других
     raise RuntimeError("unreachable")
 
