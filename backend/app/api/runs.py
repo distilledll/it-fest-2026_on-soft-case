@@ -80,6 +80,15 @@ def run_csv(run_id: str):
     return FileResponse(_dir(run_id) / "answers.csv", media_type="text/csv", filename="answers.csv")
 
 
+@router.get("/{run_id}/caught")
+def run_caught(run_id: str):
+    """Пойманные обманы: первый черновик модели был обманом по check.py, итог — нет. Плюс ложные тревоги
+    и вклад каждого критика. Материал для вопроса жюри «покажите обман, который система поймала»."""
+    _dir(run_id)
+    from app.analysis import analyze
+    return analyze(run_id)
+
+
 @router.get("/compare/{before}/{after}")
 def compare(before: str, after: str):
     """«Было/стало»: индекс, разбивка по типам и вопросы, где вердикт поменялся."""

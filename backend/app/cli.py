@@ -7,6 +7,7 @@ python -m app.cli models
 """
 import argparse
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
@@ -47,9 +48,12 @@ def main():
     r.add_argument("--role", action="append", default=[], metavar="ROLE=PROFILE",
                    help="переопределить модель, напр. --role answer=gpt --role critic=small")
     r.add_argument("--out", type=Path, help="куда дополнительно скопировать answers.csv")
+    r.add_argument("--options", default="{}", help='опции пайплайна JSON, напр. \'{"critics": [], "llm_critic": false}\'')
     r.add_argument("--concurrency", type=int, help="параллельных запросов к API (по лимиту ключа); "
                                                    "влияет только на скорость")
     sub.add_parser("runs")
+    an = sub.add_parser("analyze", help="какие обманы поймала система и каким критиком")
+    an.add_argument("run_id")
     sub.add_parser("models")
     a = ap.parse_args()
 
@@ -58,7 +62,7 @@ def main():
             settings.llm_concurrency = settings.max_concurrency = a.concurrency
         roles = dict(x.split("=", 1) for x in a.role)
         did = _dataset(a.data)
-        meta = asyncio.run(run_set(did, a.pipeline, a.label, not a.no_guard, roles or None))
+        meta = asyncio.run(run_set(did, a.pipeline, a.label, not a.no_guard, roles or None, json.loads(a.options)))
         report = meta.get("score", {}).pop("report", "")
         print(report or f"оценки нет (в датасете нет answers_public.json), статусы: {meta['statuses']}")
         print(f"run_id={meta['run_id']}  dataset={did}  llm_calls={meta['llm_calls']}  {meta['elapsed_s']}s")
@@ -70,6 +74,19 @@ def main():
             s = m.get("score", {})
             print(f"{m['run_id']}  {m['status']:8} {m['pipeline']:8} guard={m['guard']!s:5} "
                   f"index={s.get('index', '—'):>6}  {m['dataset']:18} {m['label']}")
+    elif a.cmd == "analyze":
+        from app.analysis import analyze
+        r = analyze(a.run_id)
+        print(f"{r['label']}: поймано обманов {len(r['caught'])}, ложных тревог {len(r['false_alarms'])}")
+        for c, v in r["per_critic"].items():
+            print(f"  {c:12} сработал {v.get('fired', 0):3}  поймал {v.get('caught', 0):3}  ложно {v.get('false_alarm', 0):3}")
+        for row in r["caught"]:
+            d, f = row["draft"], row["final"]
+            print(f"  ✓ {row['id']} [{row['type']}] {row['draft_why']}: «{d['status']}: {d['answer']}» → "
+                  f"«{f['status']}: {f['answer']}»  ({', '.join(row['critics'])})")
+        for row in r["false_alarms"]:
+            print(f"  ✗ {row['id']} [{row['type']}] верный «{row['draft']['answer']}» → «{row['final']['status']}» "
+                  f"({', '.join(row['critics'])})")
     elif a.cmd == "models":
         reg = llm.load()
         for p in reg.profiles:
