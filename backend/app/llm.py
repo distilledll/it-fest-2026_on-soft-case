@@ -4,6 +4,7 @@
 Хранится в storage/models.json. Ключ лучше указывать через api_key_env (имя переменной в .env);
 api_key в файле допустим (storage/ в .gitignore), но наружу через API никогда не отдаётся.
 """
+import asyncio
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import threading
 import uuid
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -30,6 +31,8 @@ class ModelProfile(BaseModel):
     temperature: float = 0.0         # для честного «было/стало» — 0
     max_tokens: int | None = None
     disable_thinking: bool = False   # chat_template_kwargs.enable_thinking=false (vLLM/Qwen)
+    json_mode: bool = True           # response_format={"type": "json_object"}, если API поддерживает
+    reasoning_effort: str | None = None   # low | medium | high — для моделей с рассуждениями
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
     def public(self) -> dict:
@@ -50,7 +53,7 @@ class ModelProfile(BaseModel):
 
     def client(self) -> AsyncOpenAI:
         return AsyncOpenAI(base_url=self.base_url, api_key=self.resolve_key() or "none",
-                           default_headers=self.headers(), timeout=settings.question_timeout_s, max_retries=2)
+                           default_headers=self.headers(), timeout=settings.llm_timeout_s, max_retries=0)
 
     def body(self) -> dict:
         b = dict(self.extra_body)
@@ -113,11 +116,65 @@ def resolve_roles(overrides: dict[str, str] | None = None) -> dict[str, ModelPro
     return out
 
 
-async def chat(profile: ModelProfile, messages: list[dict], **kw) -> str:
-    resp = await profile.client().chat.completions.create(
-        model=profile.model, messages=messages, temperature=profile.temperature,
-        max_tokens=profile.max_tokens, extra_body=profile.body() or None, **kw)
+# Шлюз может ограничивать число одновременных запросов на организацию (у нас — 1). Один семафор на процесс
+# для всех ролей и всех прогонов; повтор после 429 с паузой, которую называет сам шлюз.
+_slots: dict[int, asyncio.Semaphore] = {}
+RETRY_AFTER_RE = re.compile(r"retry after (\d+(?:\.\d+)?)\s*s", re.I)
+RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+
+
+def _slot() -> asyncio.Semaphore:
+    loop_id = id(asyncio.get_running_loop())   # семафор привязан к event loop (CLI и тесты создают свои)
+    if loop_id not in _slots:
+        _slots[loop_id] = asyncio.Semaphore(settings.llm_concurrency)
+    return _slots[loop_id]
+
+
+async def call(fn, *args, **kw):
+    """Вызов API с общим лимитом параллельности и повторами на 429/5xx/сетевых ошибках."""
+    delay = 2.0
+    for attempt in range(settings.llm_retries + 1):
+        async with _slot():
+            try:
+                return await fn(*args, **kw)
+            except RETRYABLE as e:
+                if attempt == settings.llm_retries:
+                    raise
+                m = RETRY_AFTER_RE.search(str(e))
+                wait = float(m.group(1)) + 0.5 if m else delay
+                delay = min(delay * 2, 30)
+        await asyncio.sleep(wait)   # ждём вне семафора — слот свободен для других
+    raise RuntimeError("unreachable")
+
+
+async def chat(profile: ModelProfile, messages: list[dict], json: bool = False, **kw) -> str:
+    """json=True — ждём JSON-объект: включаем response_format, если профиль это разрешает.
+    parse_json всё равно нужен: не все API соблюдают response_format строго."""
+    if json and profile.json_mode:
+        kw.setdefault("response_format", {"type": "json_object"})
+    if profile.reasoning_effort:
+        kw.setdefault("reasoning_effort", profile.reasoning_effort)
+    resp = await call(profile.client().chat.completions.create,
+                      model=profile.model, messages=messages, temperature=profile.temperature,
+                      max_tokens=profile.max_tokens, extra_body=profile.body() or None, **kw)
     return resp.choices[0].message.content or ""
+
+
+async def embed(profile: ModelProfile, texts: list[str], task: str | None = None,
+                dimensions: int | None = None) -> list[list[float]]:
+    """Эмбеддинги через POST /embeddings. task/dimensions — нестандартные поля, уходят в тело запроса
+    (напр. task="retrieval.query" для вопроса, "retrieval.passage" для фрагментов документов)."""
+    extra = dict(profile.extra_body)
+    if task:
+        extra["task"] = task
+    if dimensions:
+        extra["dimensions"] = dimensions
+    out: list[list[float]] = []
+    for i in range(0, len(texts), 64):
+        resp = await call(profile.client().embeddings.create,
+                          model=profile.model, input=texts[i:i + 64], encoding_format="float", extra_body=extra or None)
+        out += [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
+    return out
 
 
 def parse_json(text: str) -> dict:

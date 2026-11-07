@@ -65,7 +65,7 @@ async def prepare(state: State, config) -> dict:
 async def answer(state: State, config) -> dict:
     _, ctx = _cfg(config)
     prof = ctx.model("answer")
-    raw = await llm.chat(prof, state["messages"])
+    raw = await llm.chat(prof, state["messages"], json=True)
     msgs = state["messages"] + [{"role": "assistant", "content": raw}]
     upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1,
            "critic_ok": False}
@@ -110,7 +110,7 @@ async def llm_critic(state: State, config) -> dict:
     if d.status in ("нет в документах", "не знаю"):
         return {"critic_ok": True}
     prof = ctx.model("critic")
-    raw = await llm.chat(prof, [{"role": "user", "content": prompts.CRITIC.format(
+    raw = await llm.chat(prof, json=True, messages=[{"role": "user", "content": prompts.CRITIC.format(
         question=state["question"], status=d.status, answer=d.answer, file=d.file, quote=d.quote,
         around=_around(d, docs))}])
     calls = state["llm_calls"] + 1

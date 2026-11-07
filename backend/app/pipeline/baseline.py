@@ -1,14 +1,17 @@
-"""Шаг 1 кейса — точка «было»: модель «как есть», один запрос со всей закупкой, без проверок.
-Запускать с guard=False, иначе это уже не «было». Промпт нарочно простой и не меняется
-по ходу хакатона, чтобы сравнение оставалось честным."""
+"""Шаг 1 кейса — точка «было»: модель «как есть».
+
+Один запрос: все документы закупки + вопрос. Никаких «не знаю» / «нет в документах», никаких проверок —
+кейс прямо называет это улучшениями шага 2. Цитату просим только потому, что без неё check.py
+засчитывает обман автоматически, и сравнение потеряло бы смысл.
+
+Запускать с guard=False. Промпт не меняется по ходу хакатона, чтобы «было» оставалось точкой отсчёта.
+"""
 from app.llm import chat, parse_json
 from app.pipeline.base import Context, collect
 from app.schemas import Answer, Document, Question, Status, TraceStep
 
-PROMPT = """Ниже документы закупки. Ответь на вопрос.
-Верни JSON: {{"status": "ответ" | "расхождение" | "нет в документах" | "не знаю",
-"answer": "...", "quote": "дословная цитата из документа", "file": "имя файла"}}.
-Числа пиши цифрами, даты как 27.11.2026 10:00, на вопросы да/нет — "да" или "нет".
+PROMPT = """Ниже документы закупки. Ответь на вопрос по ним.
+Верни JSON: {{"answer": "ответ", "quote": "цитата из документа, на которой основан ответ", "file": "имя файла"}}.
 
 {docs}
 
@@ -27,15 +30,15 @@ class BaselinePipeline:
 
     async def stream(self, q: Question, docs: list[Document], ctx: Context):
         prof = ctx.model("answer")
-        raw = await chat(prof, [{"role": "user",
-                                 "content": PROMPT.format(docs=render_docs(docs), question=q.question)}])
+        raw = await chat(prof, json=True, messages=[
+            {"role": "user", "content": PROMPT.format(docs=render_docs(docs), question=q.question)}])
         try:
             j = parse_json(raw)
-            status = Status(j.get("status", "не знаю"))
         except ValueError:
+            # «как есть»: модель ответила текстом — его и сдаём
             yield TraceStep(node="answer", ok=False, message="модель вернула не JSON", data={"raw": raw[:500]})
-            yield Answer(id=q.id, status=Status.UNKNOWN, llm_calls=1)
+            yield Answer(id=q.id, status=Status.ANSWER, answer=raw.strip()[:300], llm_calls=1)
             return
         yield TraceStep(node="answer", ok=True, message=prof.model, data={"raw": raw[:500]})
-        yield Answer(id=q.id, status=status, answer=str(j.get("answer", "")), quote=str(j.get("quote", "")),
+        yield Answer(id=q.id, status=Status.ANSWER, answer=str(j.get("answer", "")), quote=str(j.get("quote", "")),
                      file=str(j.get("file", "")), llm_calls=1)

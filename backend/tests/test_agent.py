@@ -235,3 +235,27 @@ def test_crosscheck_ignores_amended_old_value():
 def test_negation_yes_on_non_yesno_question():
     assert "negation" in crit("Какой размер обеспечения заявки, в рублях?", status="ответ", answer="да",
                               quote="Требование об обеспечении заявок не установлено")
+
+
+def test_rate_limit_retry(monkeypatch):
+    """429 «Retry after N s» — ждём и повторяем, а не превращаем вопрос в «не знаю»."""
+    import httpx
+    from openai import RateLimitError
+
+    from app.config import settings
+    monkeypatch.setattr(settings, "llm_retries", 3)
+    sleeps, n = [], {"calls": 0}
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+
+    async def flaky():
+        n["calls"] += 1
+        if n["calls"] < 3:
+            resp = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+            raise RateLimitError("1 concurrent requests already in progress. Retry after 4 s.", response=resp, body=None)
+        return "ok"
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    assert asyncio.run(llm.call(flaky)) == "ok"
+    assert sleeps == [4.5, 4.5] and n["calls"] == 3
