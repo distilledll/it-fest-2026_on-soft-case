@@ -47,6 +47,21 @@ def snap_quote(quote: str, docs: list[Document], min_score: float = 90) -> tuple
     return (best[1], best[2]) if best else None
 
 
+def nearby(quote: str, docs: list[Document], file: str = "", width: int = 250) -> str:
+    """Окрестность цитаты в её файле (нормализованный текст). Короткая цитата «20.11.2026» —
+    а время «09:00» стоит рядом в том же предложении; ответ при этом верный."""
+    q = norm(quote)
+    if not q:
+        return ""
+    ordered = sorted(docs, key=lambda d: d.file != file)
+    for d in ordered:
+        t = norm(d.text)
+        i = t.find(q)
+        if i >= 0:
+            return t[max(0, i - width): i + len(q) + width]
+    return q
+
+
 def guard(ans: Answer, docs: list[Document], question: str = "") -> Answer:
     """Финальные правила. Если проверка не прошла и починить нельзя — честное «не знаю»."""
     if ans.status in (Status.ABSENT, Status.UNKNOWN):
@@ -68,10 +83,10 @@ def guard(ans: Answer, docs: list[Document], question: str = "") -> Answer:
 
     # Число из ответа должно встречаться в цитате — кроме вопросов-расчётов («сколько рублей составит»).
     is_calc = "составит" in question.lower()
-    a_nums, q_nums = numbers(ans.answer), numbers(ans.quote)
+    a_nums, q_nums = numbers(ans.answer), numbers(nearby(ans.quote, docs, ans.file))
     if a_nums and not is_calc and ans.status == Status.ANSWER:
         if not any(abs(a - q) < 0.01 for a in a_nums for q in q_nums):
-            ans.trace.append(TraceStep(node="guard_number", ok=False, message="числа из ответа нет в цитате",
+            ans.trace.append(TraceStep(node="guard_number", ok=False, message="числа из ответа нет рядом с цитатой",
                                        data={"answer": a_nums, "quote": q_nums}))
             return _unknown(ans)
     return ans
