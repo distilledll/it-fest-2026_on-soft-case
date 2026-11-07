@@ -5,7 +5,6 @@ WORKDIR /repo/backend
 COPY backend/pyproject.toml ./
 COPY backend/app/ app/
 RUN pip install ".[agent]"
-COPY data/sample/ /repo/data/sample/
 ENV STORAGE_DIR=/repo/storage
 RUN useradd -m appuser && mkdir -p /repo/storage && chown -R appuser /repo/storage
 USER appuser

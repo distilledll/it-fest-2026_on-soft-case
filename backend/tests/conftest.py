@@ -2,6 +2,9 @@ import pytest
 
 from app.config import settings
 
+HAS_SAMPLE = (settings.sample_dir / "packages").is_dir()
+needs_sample = pytest.mark.skipif(not HAS_SAMPLE, reason="нет data/sample (данные организатора не в репо)")
+
 
 @pytest.fixture(autouse=True)
 def tmp_storage(tmp_path, monkeypatch):

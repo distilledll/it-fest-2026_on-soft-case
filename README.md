@@ -7,13 +7,14 @@
 backend/      FastAPI, агент (LangGraph), проверки, прогоны и оценка   → backend/README.md
 backend/app/rag/  ретривер, реранкер, промпты
 frontend/     веб-интерфейс: загрузка данных, вопросы, дашборд «было/стало»
-data/sample/  пример организатора: закупки, вопросы, эталон, check.py
+data/         данные организатора — локально, не в git (см. data/README.md)
 storage/      рантайм-данные (не в git)
 ```
 
 ## Быстрый старт
 
 ```bash
+# данные организатора → data/sample (см. data/README.md)
 cp backend/.env.example backend/.env    # вписать подключение к модели
 docker compose up -d --build            # API: http://localhost:8000/docs
 ```

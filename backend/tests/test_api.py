@@ -3,6 +3,7 @@ import time
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import needs_sample
 
 c = TestClient(app)
 
@@ -24,17 +25,20 @@ def test_models_crud_never_leaks_key():
     assert c.get("/api/models").json()["roles"] == {}
 
 
+@needs_sample
 def test_ask_stub():
     r = c.post("/api/ask", json={"package": "P01", "question": "Какой размер обеспечения заявки?",
                                  "pipeline": "stub"})
     assert r.status_code == 200 and r.json()["trace"]
 
 
+@needs_sample
 def test_ask_unknown_package():
     r = c.post("/api/ask", json={"package": "P99", "question": "что?", "pipeline": "stub"})
     assert r.status_code == 404
 
 
+@needs_sample
 def test_ask_stream_stub():
     with c.stream("POST", "/api/ask/stream",
                   json={"package": "P01", "question": "Какой срок выполнения работ?", "pipeline": "stub"}) as r:
@@ -42,6 +46,7 @@ def test_ask_stream_stub():
     assert "event: step" in body and "event: answer" in body
 
 
+@needs_sample
 def test_run_and_score_stub():
     rid = c.post("/api/runs", json={"pipeline": "stub", "label": "t"}).json()["run_id"]
     for _ in range(100):

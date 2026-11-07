@@ -27,6 +27,8 @@ class DatasetError(ValueError):
 
 def path_of(dataset_id: str) -> Path:
     if dataset_id == "sample":
+        if not (settings.sample_dir / "packages").is_dir():
+            raise DatasetError("нет примера организатора: распакуйте архив в data/sample (см. data/README.md)")
         return settings.sample_dir
     if not ID_RE.match(dataset_id):
         raise DatasetError("плохой id датасета")
@@ -50,7 +52,7 @@ def info(dataset_id: str) -> dict:
 
 
 def list_all() -> list[dict]:
-    ids = ["sample"]
+    ids = ["sample"] if (settings.sample_dir / "packages").is_dir() else []
     if settings.datasets_dir.exists():
         ids += sorted((p.name for p in settings.datasets_dir.iterdir() if p.is_dir()), reverse=True)
     return [info(i) for i in ids]

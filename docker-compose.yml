@@ -11,6 +11,7 @@ services:
         required: false
     volumes:
       - ./storage:/repo/storage
+      - ./data:/repo/data:ro
     mem_limit: 2g
 
   # frontend:
