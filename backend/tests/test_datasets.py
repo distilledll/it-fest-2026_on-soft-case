@@ -49,3 +49,16 @@ def test_bad_id():
 def test_from_files():
     did = datasets.from_files([("doc.txt", "привет".encode("cp1251")), ("evil.exe", b"x")], "x", "P09")
     assert datasets.info(did)["packages"] == ["P09"]
+
+
+def test_subset_keeps_gold_and_packages():
+    import json
+    did = datasets.from_zip(make_zip({
+        "packages/P01/a.txt": "текст".encode(), "packages/P02/b.txt": "текст".encode(),
+        "questions.csv": "id;package;question\nP01-01;P01;q1\nP02-01;P02;q2\n".encode(),
+        "answers_public.json": json.dumps([{"id": "P01-01"}, {"id": "P02-01"}]).encode(),
+    }), "x")
+    sub = datasets.subset(did, ["P02-01"], "s")
+    info = datasets.info(sub)
+    assert info["packages"] == ["P02"] and info["has_gold"]
+    assert [g["id"] for g in json.loads((datasets.path_of(sub) / "answers_public.json").read_text())] == ["P02-01"]

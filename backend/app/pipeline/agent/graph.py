@@ -154,6 +154,22 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     return msgs, [step], 1
 
 
+MONTH_DATE = re.compile(r"(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[яй]|июн\w*|июл\w*|август\w*|"
+                        r"сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)\s+(\d{4})", re.I)
+TIME_WORDS = re.compile(r"(\d{1,2})\s*час\w*\s*(\d{1,2})?\s*(?:минут\w*)?", re.I)
+
+
+def normalize_answer(answer: str) -> str:
+    """Дата прописью → «ДД.ММ.ГГГГ ЧЧ:ММ» (формат, который ждёт check.py). Слабые модели переписывают дату словами."""
+    from app.verify import MONTHS
+    m = MONTH_DATE.search(answer or "")
+    if not m or re.search(r"\d{1,2}\.\d{1,2}\.\d{4}", answer):
+        return answer
+    date = f"{int(m.group(1)):02d}.{MONTHS[m.group(2).lower()[:3]]:02d}.{m.group(3)}"
+    t = TIME_WORDS.search(answer) or re.search(r"(\d{1,2}):(\d{2})", answer)
+    return f"{date} {int(t.group(1)):02d}:{int(t.group(2) or 0):02d}" if t else date
+
+
 def _vote_key(status: str, answer: str) -> str:
     from app.verify import numbers
     nums = sorted({round(x, 2) for x in numbers(answer)})
@@ -231,6 +247,7 @@ async def answer(state: State, config) -> dict:
         upd["llm_calls"] += vote_calls
         upd["vote"] = vote
         pre = pre + [vote_step]
+    d.answer = normalize_answer(d.answer)
     return {**upd, "draft": d, "issues": [],
             "trace": pre + [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
                                 data={"draft": d.__dict__, "model": prof.model})]}

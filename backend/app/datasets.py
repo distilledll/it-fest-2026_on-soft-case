@@ -148,3 +148,27 @@ def _write(path: Path, data: bytes) -> None:
     path = path.parent / _clean(path.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def subset(dataset_id: str, ids: list[str], name: str) -> str:
+    """Поднабор вопросов (с их эталоном и только нужными закупками) — чтобы гонять дорогие
+    эксперименты, например на медленной локальной модели, только на показательных вопросах."""
+    import csv
+    src = path_of(dataset_id)
+    want = set(ids)
+    did, dest = _new_dir(name)
+    with open(src / "questions.csv", encoding="utf-8") as f:
+        rows = [r for r in csv.DictReader(f, delimiter=";") if r["id"] in want]
+    if not rows:
+        shutil.rmtree(dest)
+        raise DatasetError("ни одного вопроса из списка нет в датасете")
+    with open(dest / "questions.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["id", "package", "question"], delimiter=";")
+        w.writeheader()
+        w.writerows({k: r[k] for k in ("id", "package", "question")} for r in rows)
+    if (src / "answers_public.json").exists():
+        gold = [g for g in json.loads((src / "answers_public.json").read_text(encoding="utf-8")) if g["id"] in want]
+        (dest / "answers_public.json").write_text(json.dumps(gold, ensure_ascii=False, indent=1), encoding="utf-8")
+    for pkg in sorted({r["package"] for r in rows}):
+        shutil.copytree(src / "packages" / pkg, dest / "packages" / pkg)
+    return did

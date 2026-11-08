@@ -42,7 +42,8 @@ class Issue:
 CALC_RE = re.compile(r"составит|рассчита|посчита|сколько\s+рублей.*если", re.IGNORECASE)
 YESNO_RE = re.compile(r"да\s+или\s+нет", re.IGNORECASE)
 NEGATION_RE = re.compile(
-    r"\bне\s+(установлен\w*|требует\w*|предусмотрен\w*|применя\w*|предъявля\w*|нужн\w*|обязател\w*)|отсутству\w*|не\s+устанавлива\w*",
+    r"\bне\s+(установлен\w*|требует\w*|предусмотрен\w*|применя\w*|предъявля\w*|нужн\w*|обязател\w*)|отсутству\w*"
+    r"|не\s+устанавлива\w*|утратившим\s+силу|утрачива\w*\s+силу|исключ(ить|ён|ен)\w*",
     re.IGNORECASE)
 # «Положения раздела применяются, если иное не установлено…» — шаблонная фраза, не отрицание требования
 NEGATION_NOISE_RE = re.compile(r"если\s+иное\s+не\s+(установлено|предусмотрено)", re.IGNORECASE)
@@ -213,6 +214,23 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
                 ev = nearby(e["quote"], docs, e.get("file", ""))
                 pool += number_pool(ev)
     missing = [a for a in a_nums if not any(abs(a - p) < 0.01 for p in pool)]
+    if missing and MULTIPART_CTX.get():
+        # слабые модели не приводят цитату на второе значение — ищем подтверждение сами:
+        # предложение с этим числом и хотя бы двумя словами вопроса
+        q_stems = _stems(question)
+        found = []
+        for doc in docs:
+            for sent in _sentences(doc.text):
+                if len(q_stems & _stems(sent)) < min(2, len(q_stems)) or is_injection(sent) \
+                        or superseded_by(sent, doc.file, amendments):
+                    continue
+                sp = number_pool(sent)
+                for a in missing:
+                    if a not in found and any(abs(a - x) < 0.01 for x in sp):
+                        found.append(a)
+                        d.evidence.append({"file": doc.file, "quote": sent.strip()[:300], "value": f"{a:g}",
+                                           "part": "auto"})
+        missing = [a for a in missing if a not in found]
     if missing and d.status == "расхождение":
         return [Issue("number", f"для значений {missing} нет подтверждающей цитаты — добавь в evidence "
                                 f"дословную цитату для каждого значения расхождения", data={"missing": missing})]
@@ -305,6 +323,14 @@ def critic_negation(d: Draft, docs: list[Document], question: str, amendments: l
     if neg and numbers(d.answer) and not is_calc(question) and not numbers(d.quote):
         return [Issue("negation", "цитата говорит, что требования нет, а в ответе число — "
                                   "ответь «не требуется» / «не установлено»")]
+    # весь ответ — отрицание («нет», «не требуется», «не установлено»), а не список с отрицанием одной части
+    says_no = re.fullmatch(r"\W*(нет|не\s+(требует\w*|установлен\w*|предусмотрен\w*|предъявля\w*|нужн\w*)|"
+                           r"отсутству\w*)(\W+\w+){0,3}\W*", ans) is not None
+    ev_neg = any(has_negation(e.get("quote", "")) and quote_exists(e.get("quote", ""), docs) for e in d.evidence)
+    if says_no and not neg and not ev_neg and not numbers(d.answer):
+        return [Issue("negation", f"ответ «{d.answer}» утверждает, что требования нет, но в цитате «{d.quote[:120]}» "
+                                  f"нет отрицания. Приведи фразу документа, где сказано, что требование не установлено, "
+                                  f"или ответь значением из документа")]
     return []
 
 
@@ -319,7 +345,7 @@ def critic_calc(d: Draft, docs: list[Document], question: str, amendments: list[
         value, operands = safe_eval(d.calc)
     except ValueError as e:
         return [Issue("calc", f"не могу вычислить calc «{d.calc}»: {e}")]
-    doc_nums = set(numbers(" ".join(x.text for x in docs))) | {100.0}
+    doc_nums = set(number_pool(" ".join(x.text for x in docs))) | {100.0}
     stale_nums = set()
     for a in amendments:
         stale_nums |= set(numbers(a.old_sentence or a.old_prefix)) - set(numbers(a.new_text))
@@ -458,7 +484,7 @@ def critic_fields(d: Draft, docs: list[Document], question: str, amendments: lis
         v, file, sent = cands[0]
         if d.status == "нет в документах":
             return [Issue("fields", f"в документах есть {field.title}: {v} («{sent[:120]}», {file}) — ответ есть",
-                          severity="warn", data={"value": v, "file": file})]
+                          data={"value": v, "file": file})]
         if d.status == "ответ" and not F.answer_has(field, v, d.answer):
             return [Issue("fields", f"код нашёл в документах {field.title}: {v} («{sent[:120]}», {file}), "
                                     f"а в ответе «{d.answer}» — проверь", severity="warn",
@@ -467,6 +493,47 @@ def critic_fields(d: Draft, docs: list[Document], question: str, amendments: lis
         desc = "; ".join(f"{v} в {f} («{s_[:60]}»)" for v, f, s_ in cands[:4])
         return [Issue("fields", f"код нашёл разные значения поля «{field.title}»: {desc}. Возможно, это расхождение",
                       severity="warn", data={"values": sorted(vals)})]
+    return []
+
+
+def critic_absent(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
+    """«Нет в документах» — сильное утверждение: проверяем, нет ли предложения про этот же параметр
+    с прямым отрицанием («не предусмотрено», «не устанавливается») — тогда правильный ответ «не требуется»."""
+    if d.status != "нет в документах":
+        return []
+    q_stems = _stems(question)
+    if len(q_stems) < 2:
+        return []
+    sents = [(doc.file, sent) for doc in docs for sent in _sentences(doc.text)]
+    df = Counter(st for _, sent in sents for st in _stems(sent) & q_stems)
+    idf = {st: math.log((len(sents) + 1) / (df.get(st, 0) + 1)) + 0.1 for st in q_stems}
+    total = sum(idf.values())
+    best = None
+    for file, sent in sents:
+        if not has_negation(sent) or is_injection(sent) or superseded_by(sent, file, amendments):
+            continue
+        w = sum(idf[st] for st in _stems(sent) & q_stems)
+        if w >= 0.5 * total and (best is None or w > best[0]):
+            best = (w, file, sent.strip())
+    if best:
+        return [Issue("absent", f"документ прямо говорит об этом параметре: «{best[2][:160]}» ({best[1]}). Если там "
+                                f"сказано, что требования нет — это ответ: status «ответ», answer «не требуется», "
+                                f"цитата — эта фраза", severity="warn", data={"file": best[1], "sentence": best[2]})]
+    return []
+
+
+MULTI_Q = re.compile(r"\?.*\?|\bи\s+(какой|какая|какое|какие|сколько|до\s+какой|где|каков)", re.I)
+
+
+def critic_multipart_conflict(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
+    """Вопрос из нескольких частей, а модель поставила «расхождение»: ответы на разные части — не противоречие."""
+    if d.status != "расхождение" or not MULTI_Q.search(question):
+        return []
+    parts = {str(e.get("part")) for e in d.evidence if e.get("part") not in (None, "", "auto")}
+    if len(parts) > 1 or not parts:
+        return [Issue("multipart", "вопрос состоит из нескольких частей: разные значения для разных частей — это "
+                                   "не расхождение. Ответь status «ответ», answer «значение 1; значение 2». "
+                                   "«Расхождение» — только если ОДНА И ТА ЖЕ часть в разных файлах имеет разные значения")]
     return []
 
 
@@ -480,6 +547,8 @@ CRITICS = {
     "calc": critic_calc,
     "shape": critic_shape,
     "fields": critic_fields,
+    "absent": critic_absent,
+    "multipart": critic_multipart_conflict,
 }
 
 

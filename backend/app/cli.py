@@ -52,6 +52,10 @@ def main():
     r.add_argument("--concurrency", type=int, help="параллельных запросов к API (по лимиту ключа); "
                                                    "влияет только на скорость")
     sub.add_parser("runs")
+    sb = sub.add_parser("subset", help="поднабор вопросов датасета (с эталоном) для дорогих экспериментов")
+    sb.add_argument("--data", required=True)
+    sb.add_argument("--ids", required=True, help="через запятую")
+    sb.add_argument("--name", default="поднабор")
     ld = sub.add_parser("ladder", help="все слои (baseline → промпт → критики → критик-модель) на одном датасете")
     ld.add_argument("--data", default="sample")
     ld.add_argument("--role", action="append", default=[], metavar="ROLE=PROFILE")
@@ -91,6 +95,9 @@ def main():
         for st in lad["steps"]:
             print(f"  {st['title']:34} индекс {st['index']!s:>6}  верно {st['correct']}  не знаю {st['careful']}  "
                   f"обман {st['lies']}  запросов {st['llm_calls']}  {st['elapsed_s']} с")
+    elif a.cmd == "subset":
+        did = datasets.subset(_dataset(a.data), [x.strip() for x in a.ids.split(",") if x.strip()], a.name)
+        print(f"датасет {did}: {datasets.info(did)}")
     elif a.cmd == "analyze":
         from app.analysis import analyze
         r = analyze(a.run_id)

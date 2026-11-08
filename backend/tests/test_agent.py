@@ -553,3 +553,45 @@ def test_votes_disagree_without_critic_is_unknown(monkeypatch):
                                            DOCS, ctx))
     assert a.status == Status.UNKNOWN                      # три разных ответа — без подтверждения не сдаём
     assert "critic_votes" in [t.node for t in a.trace]
+
+
+def test_weak_model_negation_without_negation_in_quote():
+    assert "negation" in crit("За сколько рабочих дней заказчик проверяет результаты?", status="ответ", answer="нет",
+                              quote="составляет 12 (двенадцать) месяцев", file="04_proekt_kontrakta.txt")
+    assert "negation" not in crit("Нужна ли лицензия ФСБ? Ответьте да или нет.", status="ответ", answer="нет",
+                                  quote="Требование о наличии лицензии ФСБ России к участникам настоящей закупки не установлено")
+
+
+def test_absent_claim_with_explicit_negation_in_docs():
+    assert crit("Нужна ли участнику лицензия ФСБ России? Ответьте да или нет.", status="нет в документах") == ["absent"]
+    assert crit("Какой срок действия банковской гарантии, в месяцах?", status="нет в документах") == []
+
+
+def test_absent_claim_against_field_extractor_is_error():
+    iss = run_critics(Draft(status="нет в документах"), DOCS, "Какая начальная (максимальная) цена контракта, в рублях?")
+    assert [(i.critic, i.severity) for i in iss] == [("fields", "error")]
+
+
+def test_multipart_question_is_not_conflict():
+    d = Draft(status="расхождение", answer="20; 36", quote="Срок поставки товара — 20 календарных дней",
+              file="01_izveshchenie.txt")
+    assert "multipart" in [i.critic for i in run_critics(d, MP_DOCS, MP_Q)]
+
+
+def test_auto_support_for_missing_number():
+    d = Draft(status="ответ", answer="20; 36", quote="Срок поставки товара — 20 календарных дней", file="01_izveshchenie.txt")
+    assert run_critics(d, MP_DOCS, MP_Q) == [] and any(e.get("part") == "auto" for e in d.evidence)
+
+
+def test_date_in_words_normalized():
+    from app.pipeline.agent.graph import normalize_answer
+    assert normalize_answer("до 10 часов 00 минут (по московскому времени) 27 ноября 2026 года") == "27.11.2026 10:00"
+    assert normalize_answer("27.11.2026 10:00") == "27.11.2026 10:00"
+    assert normalize_answer("5 марта 2027 года") == "05.03.2027"
+
+
+def test_calc_understands_thousands():
+    docs = [doc("01.txt", "Начальная (максимальная) цена контракта: 1 250 тыс. руб.\nОбеспечение исполнения контракта "
+                          "устанавливается в размере 5 % от цены контракта.\n")]
+    d = Draft(status="ответ", answer="62500", quote="5 % от цены контракта", file="01.txt", calc="1250000 * 5 / 100")
+    assert run_critics(d, docs, "Сколько рублей составит обеспечение исполнения контракта, если контракт заключат по НМЦК?") == []
