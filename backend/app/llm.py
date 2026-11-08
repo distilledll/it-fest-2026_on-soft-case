@@ -7,6 +7,7 @@ api_key в файле допустим (storage/ в .gitignore), но наруж
 import asyncio
 import json
 import logging
+import time
 import os
 import re
 import threading
@@ -129,6 +130,15 @@ RETRY_AFTER_RE = re.compile(r"retry after (\d+(?:\.\d+)?)\s*s", re.I)
 RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
 
 
+# Обрыв связи/5xx — это шлюз лёг, а не один плохой запрос. Общая пауза на весь процесс: все запросы
+# ждут вместе (с растущей паузой) и продолжают, когда шлюз вернётся, а не сжигают каждый свои повторы.
+_outage = {"until": 0.0, "delay": 5.0}
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
 def _slot() -> asyncio.Semaphore:
     loop_id = id(asyncio.get_running_loop())   # семафор привязан к event loop (CLI и тесты создают свои)
     if loop_id not in _slots:
@@ -138,24 +148,46 @@ def _slot() -> asyncio.Semaphore:
 
 async def call(fn, *args, **kw):
     """Вызов API с общим лимитом параллельности и повторами.
-    429 — до llm_retries раз (это просто очередь); тайм-ауты/5xx/сеть — не больше 2 раз,
-    иначе один зависший вопрос держит прогон десятки минут."""
-    delay, slow_fails = 2.0, 0
-    for attempt in range(settings.llm_retries + 1):
+    - 429 — до llm_retries раз с паузой, которую называет шлюз (это просто очередь);
+    - тайм-аут одного запроса — не больше 2 повторов, иначе зависший вопрос держит прогон;
+    - обрыв связи / 5xx — шлюз недоступен: общая пауза для всех запросов, ждём до llm_outage_s."""
+    delay, timeouts, waited = 2.0, 0, 0.0
+    rate_limits = 0
+    while True:
+        pause = _outage["until"] - _now()
+        if pause > 0:                                   # шлюз лежит — ждём вместе со всеми
+            await asyncio.sleep(pause)
+            waited += pause
         async with _slot():
             try:
-                return await fn(*args, **kw)
-            except RETRYABLE as e:
-                rate_limited = isinstance(e, RateLimitError)
-                slow_fails += not rate_limited
-                if attempt == settings.llm_retries or slow_fails > 2:
+                result = await fn(*args, **kw)
+                _outage["delay"] = 5.0
+                return result
+            except RateLimitError as e:
+                rate_limits += 1
+                if rate_limits > settings.llm_retries:
                     raise
                 m = RETRY_AFTER_RE.search(str(e))
                 wait = float(m.group(1)) + 0.5 if m else delay
                 delay = min(delay * 2, 30)
-                log.warning("LLM %s, повтор %d через %.1f с", type(e).__name__, attempt + 1, wait)
-        await asyncio.sleep(wait)   # ждём вне семафора — слот свободен для других
-    raise RuntimeError("unreachable")
+                log.warning("LLM 429, повтор %d через %.1f с", rate_limits, wait)
+            except APITimeoutError:
+                timeouts += 1
+                if timeouts > 2:
+                    raise
+                wait = delay
+                delay = min(delay * 2, 30)
+                log.warning("LLM тайм-аут запроса, повтор %d через %.1f с", timeouts, wait)
+            except (APIConnectionError, InternalServerError) as e:
+                if waited >= settings.llm_outage_s:
+                    raise
+                if _now() >= _outage["until"]:              # первый, кто заметил — объявляет паузу для всех
+                    wait = _outage["delay"]
+                    _outage["until"] = _now() + wait
+                    _outage["delay"] = min(wait * 2, 60.0)
+                    log.warning("API недоступен (%s), все запросы ждут %.0f с", type(e).__name__, wait)
+                continue                                    # пауза — в начале цикла, вне семафора
+        await asyncio.sleep(wait)   # ждём вне семафора — слот свободен для других (не в счёт простоя шлюза)
 
 
 async def chat(profile: ModelProfile, messages: list[dict], json: bool = False, **kw) -> str:

@@ -315,6 +315,51 @@ def test_timeouts_are_not_retried_forever(monkeypatch):
     assert n["c"] == 3
 
 
+def test_outage_waits_for_gateway_instead_of_failing(monkeypatch):
+    """Шлюз лежит несколько минут: запрос ждёт общую паузу и проходит, когда связь вернулась."""
+    import httpx
+    from openai import APIConnectionError
+    clock, sleeps = {"t": 0.0}, []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm, "_now", lambda: clock["t"])
+    n = {"c": 0}
+
+    async def down_for_a_while():
+        n["c"] += 1
+        if clock["t"] < 100:                       # ~100 с простоя: больше, чем старые «2 повтора за 6 с»
+            raise APIConnectionError(request=httpx.Request("POST", "http://x"))
+        return "ok"
+
+    assert asyncio.run(llm.call(down_for_a_while)) == "ok"
+    assert sleeps[:3] == [5.0, 10.0, 20.0] and clock["t"] >= 100
+
+
+def test_outage_gives_up_after_limit(monkeypatch):
+    import httpx
+    from openai import APIConnectionError
+    from app.config import settings
+    clock = {"t": 0.0}
+
+    async def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm, "_now", lambda: clock["t"])
+    monkeypatch.setattr(settings, "llm_outage_s", 60)
+
+    async def dead():
+        raise APIConnectionError(request=httpx.Request("POST", "http://x"))
+
+    with pytest.raises(APIConnectionError):
+        asyncio.run(llm.call(dead))
+    assert 60 <= clock["t"] < 200
+
+
 def test_number_in_words_and_years_to_months():
     docs = [doc("01.txt", "Обеспечение заявки предоставляется в размере пятидесяти тысяч рублей.\n"
                           "Гарантийный срок составляет 2 (два) года.\n")]
