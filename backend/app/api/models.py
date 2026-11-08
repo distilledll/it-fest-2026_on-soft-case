@@ -2,7 +2,7 @@
 import time
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import llm
 from app.llm import ROLES, ModelProfile
@@ -36,7 +36,11 @@ class ProfilePatch(BaseModel):
     extra_headers: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    concurrency: int | None = Field(default=None, ge=1, le=64)
+    context_window: int | None = Field(default=None, ge=512, le=4_000_000)
     disable_thinking: bool | None = None
+    json_mode: bool | None = None
+    reasoning_effort: str | None = None   # low | medium | high; пустая строка — выключить
     extra_body: dict | None = None
 
 

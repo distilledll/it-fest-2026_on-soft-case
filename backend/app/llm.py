@@ -5,6 +5,7 @@
 api_key в файле допустим (storage/ в .gitignore), но наружу через API никогда не отдаётся.
 """
 import asyncio
+from contextlib import AsyncExitStack
 import json
 import logging
 import os
@@ -33,6 +34,8 @@ class ModelProfile(BaseModel):
     extra_headers: str = ""          # "User-Agent=...;X-Foo=bar" — шлюз может резать дефолтный UA SDK
     temperature: float = 0.0         # для честного «было/стало» — 0
     max_tokens: int | None = None
+    concurrency: int = 4          # потолок одновременных запросов этого профиля; общий env-лимит всё равно сильнее
+    context_window: int = 32768   # справка: сколько токенов модель видит; в UI настроек
     disable_thinking: bool = False   # chat_template_kwargs.enable_thinking=false (vLLM/Qwen)
     json_mode: bool = True           # response_format={"type": "json_object"}, если API поддерживает
     reasoning_effort: str | None = None   # low | medium | high — для моделей с рассуждениями
@@ -122,6 +125,7 @@ def resolve_roles(overrides: dict[str, str] | None = None) -> dict[str, ModelPro
 # Шлюз может ограничивать число одновременных запросов на организацию (у нас — 1). Один семафор на процесс
 # для всех ролей и всех прогонов; повтор после 429 с паузой, которую называет сам шлюз.
 _slots: dict[int, asyncio.Semaphore] = {}
+_pslots: dict[tuple[int, str, int], asyncio.Semaphore] = {}
 RETRY_AFTER_RE = re.compile(r"retry after (\d+(?:\.\d+)?)\s*s", re.I)
 RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
 
@@ -133,13 +137,24 @@ def _slot() -> asyncio.Semaphore:
     return _slots[loop_id]
 
 
-async def call(fn, *args, **kw):
-    """Вызов API с общим лимитом параллельности и повторами.
+def _profile_slot(p: ModelProfile) -> asyncio.Semaphore:
+    """Личный лимит профиля: свой семафор на (loop, профиль, заявленный лимит)."""
+    key = (id(asyncio.get_running_loop()), p.id, max(1, p.concurrency))
+    if key not in _pslots:
+        _pslots[key] = asyncio.Semaphore(key[2])
+    return _pslots[key]
+
+
+async def call(fn, *args, profile: ModelProfile | None = None, **kw):
+    """Вызов API с общим и личным (профиля) лимитами параллельности и повторами.
     429 — до llm_retries раз (это просто очередь); тайм-ауты/5xx/сеть — не больше 2 раз,
     иначе один зависший вопрос держит прогон десятки минут."""
     delay, slow_fails = 2.0, 0
     for attempt in range(settings.llm_retries + 1):
-        async with _slot():
+        async with AsyncExitStack() as gate:
+            await gate.enter_async_context(_slot())
+            if profile is not None:
+                await gate.enter_async_context(_profile_slot(profile))
             try:
                 return await fn(*args, **kw)
             except RETRYABLE as e:
@@ -163,7 +178,7 @@ async def chat(profile: ModelProfile, messages: list[dict], json: bool = False, 
     if profile.reasoning_effort:
         kw.setdefault("reasoning_effort", profile.reasoning_effort)
     temperature = kw.pop("temperature", profile.temperature)
-    resp = await call(profile.client().chat.completions.create,
+    resp = await call(profile.client().chat.completions.create, profile=profile,
                       model=profile.model, messages=messages, temperature=temperature,
                       max_tokens=profile.max_tokens, extra_body=profile.body() or None, **kw)
     return resp.choices[0].message.content or ""
@@ -180,7 +195,7 @@ async def embed(profile: ModelProfile, texts: list[str], task: str | None = None
         extra["dimensions"] = dimensions
     out: list[list[float]] = []
     for i in range(0, len(texts), 64):
-        resp = await call(profile.client().embeddings.create,
+        resp = await call(profile.client().embeddings.create, profile=profile,
                           model=profile.model, input=texts[i:i + 64], encoding_format="float", extra_body=extra or None)
         out += [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
     return out
