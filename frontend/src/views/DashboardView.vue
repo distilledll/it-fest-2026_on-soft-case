@@ -223,7 +223,7 @@ function downloadCurrent() {
           <span v-if="delta !== null" class="badge" :class="delta >= 0 ? 'badge--ok' : 'badge--bad'">
             {{ signed(delta) }} к прогону «было»
           </span>
-          <span v-else class="badge">оценки check.py нет — сравнение недоступно</span>
+          <span v-else class="badge">оценки нет — сравнение недоступно</span>
         </p>
 
         <div v-if="rows.length" class="index__bar" role="img" aria-label="Доли вердиктов">
