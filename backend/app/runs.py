@@ -218,7 +218,7 @@ def write_answers_csv(answers: list[Answer], path: Path) -> None:
 
 def score(answers_csv: Path, data_dir: Path, out_csv: Path) -> dict:
     """Оцениваем оригинальным check.py — ровно так же, как жюри."""
-    checker = data_dir / "check.py" if (data_dir / "check.py").exists() else settings.checker
+    checker, source = datasets.checker_for(data_dir)
     p = subprocess.run(
         [sys.executable, "-I", str(checker), str(answers_csv.resolve()),
          "--gold", str(data_dir / "answers_public.json"), "--packages", str(data_dir / "packages"),
@@ -227,6 +227,7 @@ def score(answers_csv: Path, data_dir: Path, out_csv: Path) -> dict:
     )
     m = re.search(r"^RESULT (.+)$", p.stdout, re.MULTILINE)
     res = json.loads(m.group(1)) if m else {"error": p.stderr[-2000:]}
+    res["checker"] = source
     res["by_type"] = _by_type(out_csv) if out_csv.exists() else {}
     res["report"] = p.stdout
     return res

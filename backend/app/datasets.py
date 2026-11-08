@@ -38,6 +38,14 @@ def path_of(dataset_id: str) -> Path:
     return p
 
 
+def checker_for(data_dir: Path) -> tuple[Path, str]:
+    """Чем оценивать прогон: check.py из архива (если его положили) или эталонный из репозитория."""
+    own = data_dir / "check.py"
+    if own.is_file():
+        return own, "из архива"
+    return settings.checker, "эталонный (backend/eval/check.py)"
+
+
 def info(dataset_id: str) -> dict:
     root = path_of(dataset_id)
     meta_p = root / "dataset.json"
@@ -48,6 +56,7 @@ def info(dataset_id: str) -> dict:
         "packages": sorted(p.name for p in pk.iterdir() if p.is_dir()) if pk.exists() else [],
         "has_questions": (root / "questions.csv").exists(),
         "has_gold": (root / "answers_public.json").exists(),
+        "checker": checker_for(root)[1],
     }
 
 
@@ -132,7 +141,7 @@ def from_files(files: list[tuple[str, bytes]], name: str, package: str = "P01") 
     for fname, data in files:
         if fname.lower().endswith(".txt"):
             _write(dest / "packages" / package / _clean(fname), data)
-        elif fname in ("questions.csv", "answers_public.json"):
+        elif fname in ("questions.csv", "answers_public.json", "check.py"):
             _write(dest / fname, data)
     if not (dest / "packages").exists():
         shutil.rmtree(dest)
@@ -169,6 +178,8 @@ def subset(dataset_id: str, ids: list[str], name: str) -> str:
     if (src / "answers_public.json").exists():
         gold = [g for g in json.loads((src / "answers_public.json").read_text(encoding="utf-8")) if g["id"] in want]
         (dest / "answers_public.json").write_text(json.dumps(gold, ensure_ascii=False, indent=1), encoding="utf-8")
+    if (src / "check.py").is_file():                 # поднабор оценивается тем же check.py, что и исходный
+        shutil.copy2(src / "check.py", dest / "check.py")
     for pkg in sorted({r["package"] for r in rows}):
         shutil.copytree(src / "packages" / pkg, dest / "packages" / pkg)
     return did

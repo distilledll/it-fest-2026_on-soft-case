@@ -62,3 +62,13 @@ def test_subset_keeps_gold_and_packages():
     info = datasets.info(sub)
     assert info["packages"] == ["P02"] and info["has_gold"]
     assert [g["id"] for g in json.loads((datasets.path_of(sub) / "answers_public.json").read_text())] == ["P02-01"]
+
+
+def test_checker_from_archive_or_repo():
+    from app.config import settings
+    own = datasets.from_zip(make_zip({"packages/P01/a.txt": "т".encode(), "check.py": b"print('RESULT {}')"}), "x")
+    path, src = datasets.checker_for(datasets.path_of(own))
+    assert path.parent == datasets.path_of(own) and src == "из архива"
+    plain = datasets.from_zip(make_zip({"packages/P01/a.txt": "т".encode()}), "y")
+    path, src = datasets.checker_for(datasets.path_of(plain))
+    assert path == settings.checker and path.is_file() and "эталонный" in datasets.info(plain)["checker"]

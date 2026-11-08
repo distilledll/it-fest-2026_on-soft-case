@@ -24,8 +24,8 @@ def _checker(path: str):
 
 
 def _judge_fn(data_dir: Path):
-    path = data_dir / "check.py" if (data_dir / "check.py").exists() else settings.checker
-    chk = _checker(str(path))
+    from app.datasets import checker_for
+    chk = _checker(str(checker_for(data_dir)[0]))
     gold = {g["id"]: g for g in json.loads((data_dir / "answers_public.json").read_text(encoding="utf-8"))}
     docs: dict[str, dict] = {}
 

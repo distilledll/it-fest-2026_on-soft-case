@@ -16,7 +16,8 @@ class Settings(BaseSettings):
 
     # Встроенный пример организатора (датасет "sample") и оценщик по умолчанию.
     sample_dir: Path = ROOT / "data" / "sample"
-    checker: Path = ROOT / "data" / "sample" / "check.py"
+    # check.py из архива датасета, если он там есть; иначе эталонный оценщик организатора из репозитория
+    checker: Path = BACKEND / "eval" / "check.py"
     # Всё, что меняется в рантайме: загруженные датасеты, прогоны, models.json.
     storage_dir: Path = ROOT / "storage"
 

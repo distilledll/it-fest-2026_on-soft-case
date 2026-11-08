@@ -44,6 +44,8 @@ class DatasetInfo(Out):
     packages: list[str] = Field(examples=[["P01", "P02"]])
     has_questions: bool = Field(description="есть questions.csv — можно запускать прогоны")
     has_gold: bool = Field(description="есть answers_public.json — прогоны оцениваются check.py")
+    checker: str = Field("эталонный (backend/eval/check.py)",
+                         description="чем оцениваются прогоны: check.py «из архива» или эталонный из репозитория")
 
 
 class DatasetDetail(DatasetInfo):
@@ -102,6 +104,7 @@ class Score(Out):
     lies: int | None = Field(None, description="обманы — минус балл")
     index: float | None = Field(None, description="индекс доверия = (верно − обман) / всего × 100")
     by_type: dict[str, ByType] = Field(default_factory=dict, description="тип вопроса → вердикты")
+    checker: str | None = Field(None, description="чем оценено: «из архива» или эталонный check.py")
     error: str | None = None
 
 
