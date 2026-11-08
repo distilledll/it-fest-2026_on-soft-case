@@ -137,6 +137,8 @@ class RunMeta(Out):
     progress: Progress | None = Field(None, description="пока прогон идёт")
     llm_concurrency: int | None = None
     ladder: LadderRef | None = None
+    failed: int | None = Field(None, description="вопросов с техническим сбоем (сеть, тайм-аут) — дозапуск через /resume")
+    resumed: int | None = None
     error: str | None = None
 
 

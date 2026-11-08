@@ -52,6 +52,10 @@ def main():
     r.add_argument("--concurrency", type=int, help="параллельных запросов к API (по лимиту ключа); "
                                                    "влияет только на скорость")
     sub.add_parser("runs")
+    rs = sub.add_parser("resume", help="дозапустить прогон: недостающие и упавшие (сеть, тайм-аут) вопросы")
+    rs.add_argument("run_id")
+    rs.add_argument("--out", type=Path)
+    rs.add_argument("--concurrency", type=int)
     sb = sub.add_parser("subset", help="поднабор вопросов датасета (с эталоном) для дорогих экспериментов")
     sb.add_argument("--data", required=True)
     sb.add_argument("--ids", required=True, help="через запятую")
@@ -74,7 +78,8 @@ def main():
         meta = asyncio.run(run_set(did, a.pipeline, a.label, not a.no_guard, roles or None, json.loads(a.options)))
         report = meta.get("score", {}).pop("report", "")
         print(report or f"оценки нет (в датасете нет answers_public.json), статусы: {meta['statuses']}")
-        print(f"run_id={meta['run_id']}  dataset={did}  llm_calls={meta['llm_calls']}  {meta['elapsed_s']}s")
+        print(f"run_id={meta['run_id']}  dataset={did}  llm_calls={meta['llm_calls']}  {meta['elapsed_s']}s"
+              + (f"  УПАВШИХ: {meta['failed']} — дозапуск: python -m app.cli resume {meta['run_id']}" if meta.get("failed") else ""))
         if a.out:
             shutil.copy(settings.runs_dir / meta["run_id"] / "answers.csv", a.out)
             print(f"answers.csv → {a.out}")
@@ -95,6 +100,17 @@ def main():
         for st in lad["steps"]:
             print(f"  {st['title']:34} индекс {st['index']!s:>6}  верно {st['correct']}  не знаю {st['careful']}  "
                   f"обман {st['lies']}  запросов {st['llm_calls']}  {st['elapsed_s']} с")
+    elif a.cmd == "resume":
+        from app.runs import resume_run
+        if a.concurrency:
+            settings.llm_concurrency = settings.max_concurrency = a.concurrency
+        meta = asyncio.run(resume_run(a.run_id))
+        report = meta.get("score", {}).pop("report", "")
+        print(report or f"статусы: {meta['statuses']}")
+        print(f"run_id={meta['run_id']}  дозапущено {meta.get('resumed')}  упавших осталось {meta.get('failed')}")
+        if a.out:
+            shutil.copy(settings.runs_dir / meta["run_id"] / "answers.csv", a.out)
+            print(f"answers.csv → {a.out}")
     elif a.cmd == "subset":
         did = datasets.subset(_dataset(a.data), [x.strip() for x in a.ids.split(",") if x.strip()], a.name)
         print(f"датасет {did}: {datasets.info(did)}")

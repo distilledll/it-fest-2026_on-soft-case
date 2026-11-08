@@ -90,6 +90,17 @@ def run_caught(run_id: str):
     return analyze(run_id)
 
 
+@router.post("/{run_id}/resume", status_code=202, response_model=out.RunStarted)
+async def resume(run_id: str):
+    """Дозапустить прогон: вопросы, которых нет (процесс упал) или которые упали из-за сети/тайм-аута."""
+    _dir(run_id)
+    from app.runs import resume_run
+    t = asyncio.create_task(resume_run(run_id))
+    _tasks.add(t)
+    t.add_done_callback(_tasks.discard)
+    return {"run_id": run_id}
+
+
 @router.get("/compare/{before}/{after}", response_model=out.CompareOut)
 def compare(before: str, after: str):
     """«Было/стало»: индекс, разбивка по типам и вопросы, где вердикт поменялся."""

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     llm_retries: int = 8            # повторы на 429/5xx/сетевых ошибках
     llm_timeout_s: float = 90.0     # таймаут одного запроса к API
     question_timeout_s: float = 600.0   # на весь вопрос, включая ожидание очереди и повторы
+    retry_pauses_s: list[float] = [10.0, 30.0, 60.0]   # повтор упавших вопросов прогона: паузы между раундами
     max_upload_mb: int = 200
     embed_dimensions: int = 256     # размерность эмбеддингов для поиска фрагментов (меньше — быстрее и легче кэш)
 
