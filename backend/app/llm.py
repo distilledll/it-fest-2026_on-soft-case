@@ -162,8 +162,9 @@ async def chat(profile: ModelProfile, messages: list[dict], json: bool = False, 
         kw.setdefault("response_format", {"type": "json_object"})
     if profile.reasoning_effort:
         kw.setdefault("reasoning_effort", profile.reasoning_effort)
+    temperature = kw.pop("temperature", profile.temperature)
     resp = await call(profile.client().chat.completions.create,
-                      model=profile.model, messages=messages, temperature=profile.temperature,
+                      model=profile.model, messages=messages, temperature=temperature,
                       max_tokens=profile.max_tokens, extra_body=profile.body() or None, **kw)
     return resp.choices[0].message.content or ""
 

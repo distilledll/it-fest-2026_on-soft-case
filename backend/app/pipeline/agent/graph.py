@@ -15,8 +15,12 @@
   retriever: str          "hybrid" (BM25 + эмбеддинги, по умолчанию) | "keyword" (для сравнения)
   rerank: bool            реранк фрагментов моделью (False — включать по замеру)
   quote_first: bool       сначала модель выписывает фрагменты, код их проверяет и размечает, ответ — только по ним
+  votes: int              голосование: сколько ответов сравнить на первой попытке (1 — выключено)
 """
+import asyncio
 import operator
+import re
+from collections import Counter
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -42,6 +46,7 @@ class State(TypedDict, total=False):
     fragments: bool            # модель видит фрагменты, а не документы целиком
     researched: bool           # повторный поиск перед «нет в документах» уже был
     quotes_ready: bool         # шаг «сначала цитаты» выполнен (опция quote_first)
+    vote: dict | None          # итог голосования (опция votes)
     critic_ok: bool
     attempts: int
     llm_calls: int
@@ -149,6 +154,53 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     return msgs, [step], 1
 
 
+def _vote_key(status: str, answer: str) -> str:
+    from app.verify import numbers
+    nums = sorted({round(x, 2) for x in numbers(answer)})
+    if nums:
+        return f"{status}|{nums}"
+    a = norm(answer)
+    if re.search(r"\bнет\b|не\s+(требует|установлен|предусмотрен)", a):
+        return f"{status}|нет"
+    if re.search(r"\bда\b", a):
+        return f"{status}|да"
+    return f"{status}|{re.sub(r'[^а-яa-z]', '', a)[:20]}"
+
+
+async def _vote(d: Draft, messages: list[dict], prof, votes: int, ctx) -> tuple[dict, TraceStep, int]:
+    """Голосование (самосогласованность): ещё votes−1 ответов с ненулевой температурой.
+    Возвращает {"top": ключ большинства, "agree": доля, "variants": [...]}."""
+    temp = float(_opt(ctx, "vote_temperature", 0.7))
+    raws = await asyncio.gather(*(llm.chat(prof, messages, json=True, temperature=temp) for _ in range(votes - 1)),
+                                return_exceptions=True)
+    variants = [(d.status, d.answer)]
+    for r in raws:
+        try:
+            j = llm.parse_json(r) if isinstance(r, str) else {}
+            if j:
+                variants.append((str(j.get("status", "")).strip().lower(), str(j.get("answer") or "")))
+        except (ValueError, TypeError):
+            continue
+    keys = Counter(_vote_key(s, a) for s, a in variants)
+    top, n = keys.most_common(1)[0]
+    vote = {"top": top, "agree": n / len(variants), "variants": variants}
+    step = TraceStep(node="votes", ok=vote["agree"] >= 2 / 3 and _vote_key(d.status, d.answer) == top,
+                     message=f"голосование: согласие {n} из {len(variants)}",
+                     data={"variants": [f"{s}: {a}" for s, a in variants]})
+    return vote, step, votes - 1
+
+
+def _vote_unreliable(vote: dict | None, d: Draft | None) -> bool:
+    return bool(vote and d and (vote["agree"] < 2 / 3 or _vote_key(d.status, d.answer) != vote["top"]))
+
+
+def _vote_issue(vote: dict) -> Issue:
+    alts = "; ".join(f"«{s}: {a[:60]}»" for s, a in vote["variants"])
+    return Issue("votes", f"при повторных запросах модель отвечает по-разному: {alts}. Перепроверь по документам и "
+                          f"выбери ответ, который подтверждается дословной цитатой", severity="warn",
+                 data={"variants": vote["variants"]})
+
+
 async def answer(state: State, config) -> dict:
     docs, ctx = _cfg(config)
     prof = ctx.model("answer")
@@ -173,6 +225,12 @@ async def answer(state: State, config) -> dict:
         issue = Issue("format", f"ответ не в формате JSON: {e}")
         return {**upd, "draft": None, "issues": [issue],
                 "trace": pre + [TraceStep(node="answer", ok=False, message=issue.message, data={"raw": raw[:800]})]}
+    votes = int(_opt(ctx, "votes", 1) or 1)
+    if votes > 1 and state["attempts"] == 0:
+        vote, vote_step, vote_calls = await _vote(d, state["messages"], prof, votes, ctx)
+        upd["llm_calls"] += vote_calls
+        upd["vote"] = vote
+        pre = pre + [vote_step]
     return {**upd, "draft": d, "issues": [],
             "trace": pre + [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
                                 data={"draft": d.__dict__, "model": prof.model})]}
@@ -190,6 +248,8 @@ async def check(state: State, config) -> dict:
     finally:
         MULTIPART_CTX.reset(token)
     # warn — один повтор на критика; если модель настаивает, оставляем её решение
+    if state["attempts"] == 1 and _vote_unreliable(state.get("vote"), d):
+        issues.append(_vote_issue(state["vote"]))
     fresh = [i for i in issues if i.severity == "error" or i.critic not in state["warned"]]
     warned = state["warned"] + [i.critic for i in fresh if i.severity == "warn"]
     # повторные warn не гоняют модель снова, но запоминаются: если ответ так и сдаётся — finalize решит
@@ -263,6 +323,8 @@ async def finalize(state: State, config) -> dict:
     strict = ("conflict",) if state.get("critic_ok") else ("conflict", "crosscheck")
     errors = [i for i in state.get("issues", []) + state.get("pending_warns", [])
               if i.severity == "error" or i.critic in strict]
+    if not errors and not state.get("critic_ok") and _vote_unreliable(state.get("vote"), d):
+        errors = [_vote_issue(state["vote"])]
     if d is None or errors:
         why = "; ".join(i.message for i in errors)[:300] or "нет корректного ответа"
         return {"final": Draft(status="не знаю"),

@@ -532,3 +532,24 @@ def test_quote_first_verifies_and_tags_quotes(monkeypatch):
     assert "[СТАРАЯ РЕДАКЦИЯ]" in prompt_b and "[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]" in prompt_b
     assert "30 декабря" not in prompt_b                       # выдуманный фрагмент не дошёл до модели
     assert "[НАЙДЕНО КОДОМ: окончание подачи заявок = 27.11.2026 10:00]" in prompt_b
+
+
+def test_votes_agree(monkeypatch):
+    good = {"status": "ответ", "answer": "12", "quote": "составляет 12 (двенадцать) месяцев", "file": "04_proekt_kontrakta.txt"}
+    script(monkeypatch, [good, good, good])
+    ctx = Context(models=CTX.models, options={"votes": 3, "llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Какой гарантийный срок, в месяцах?"),
+                                           DOCS, ctx))
+    assert a.status == Status.ANSWER and a.llm_calls == 3
+    assert next(t for t in a.trace if t.node == "votes").ok
+
+
+def test_votes_disagree_without_critic_is_unknown(monkeypatch):
+    v = lambda n: {"status": "ответ", "answer": n, "quote": "составляет 12 (двенадцать) месяцев", "file": "04_proekt_kontrakta.txt"}
+    script(monkeypatch, [v("12"), {"status": "ответ", "answer": "24"}, {"status": "нет в документах", "answer": ""},
+                         v("12")])
+    ctx = Context(models=CTX.models, options={"votes": 3, "llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Какой гарантийный срок, в месяцах?"),
+                                           DOCS, ctx))
+    assert a.status == Status.UNKNOWN                      # три разных ответа — без подтверждения не сдаём
+    assert "critic_votes" in [t.node for t in a.trace]
