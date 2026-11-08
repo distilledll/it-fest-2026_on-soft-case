@@ -172,6 +172,26 @@ async def chat(profile: ModelProfile, messages: list[dict], json: bool = False, 
     return resp.choices[0].message.content or ""
 
 
+async def wait_ready(profile: ModelProfile, max_wait_s: float = 900, every_s: float = 30) -> bool:
+    """Ждём, пока API снова отвечает (после обрыва связи): короткий запрос без очереди повторов.
+    Иначе раунд повтора упавших вопросов сгорает за секунды, пока шлюз ещё лежит."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait_s
+    while True:
+        try:
+            await asyncio.wait_for(profile.client().chat.completions.create(
+                model=profile.model, messages=[{"role": "user", "content": "ok"}], max_tokens=1,
+                extra_body=profile.body() or None), 30)
+            return True
+        except RateLimitError:
+            return True                      # 429 — шлюз жив, просто очередь
+        except Exception as e:  # noqa: BLE001 — любая ошибка связи значит «ещё не поднялся»
+            if loop.time() + every_s > deadline:
+                return False
+            log.warning("API недоступен (%s), жду %.0f с", type(e).__name__, every_s)
+            await asyncio.sleep(every_s)
+
+
 async def embed(profile: ModelProfile, texts: list[str], task: str | None = None,
                 dimensions: int | None = None) -> list[list[float]]:
     """Эмбеддинги через POST /embeddings. task/dimensions — нестандартные поля, уходят в тело запроса

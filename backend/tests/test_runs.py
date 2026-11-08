@@ -31,6 +31,30 @@ class Flaky:
         return Answer(id=q.id, status=Status.UNKNOWN, llm_calls=1)
 
 
+def test_map_timeout_scales_with_chunks():
+    from app.pipeline.base import Context
+    assert runs.question_timeout(Context(models={}, options={})) == settings.question_timeout_s
+    assert runs.question_timeout(Context(models={}, options={"map_extract": True, "map_max_chunks": 30})) == \
+        3 * settings.question_timeout_s
+
+
+def test_retry_round_waits_for_api(monkeypatch):
+    from app import llm
+    monkeypatch.setattr(settings, "retry_pauses_s", [0, 0])
+    probes = []
+
+    async def down(profile, **kw):
+        probes.append(profile)
+        return False
+    monkeypatch.setattr(llm, "wait_ready", down)
+    p = Flaky({"Q1": 1})
+    monkeypatch.setattr(runs, "get_pipeline", lambda name: p)
+    monkeypatch.setattr(runs, "make_context", lambda *a, **k: runs.Context(models={"answer": llm.ModelProfile(id="m", name="m", base_url="http://x", model="m")}, options={}))
+    meta = asyncio.run(runs.run_set(make_dataset(2), "flaky", use_guard=False))
+    # API не поднялся — раунд не тратим впустую, вопрос остаётся «упавшим» для resume
+    assert len(probes) == 1 and p.seen["Q1"] == 1 and meta["failed"] == 1
+
+
 def test_failed_questions_are_retried(monkeypatch):
     monkeypatch.setattr(settings, "retry_pauses_s", [0, 0])
     p = Flaky({"Q1": 1, "Q2": 2})

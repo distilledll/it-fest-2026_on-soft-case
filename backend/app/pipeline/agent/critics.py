@@ -77,6 +77,7 @@ class Amendment:
     old_sentence: str = ""     # полное старое предложение из целевого файла (если нашли)
     repealed: bool = False     # пункт признан утратившим силу — требования больше нет
     clause: str = ""           # номер пункта, если изменение ссылается на номер
+    repeal_text: str = ""      # дословная строка «Пункт N … признать утратившим силу» из файла изменений
 
 
 AMEND_NUM_RE = re.compile(
@@ -125,7 +126,11 @@ def parse_amendments(docs: list[Document]) -> list[Amendment]:
         for m in REPEAL_RE.finditer(d.text):
             target = m["file"] or _notice_file(docs)
             old_sent = _clause_sentence(by_file[target].text, m["num"]) if target in by_file else ""
-            out.append(Amendment(d.file, target or "", old_sent[:80], "", old_sent, repealed=True, clause=m["num"]))
+            start = d.text.rfind("\n", 0, m.start()) + 1
+            end = d.text.find("\n", m.end())
+            line = d.text[start: end if end >= 0 else len(d.text)].strip()
+            out.append(Amendment(d.file, target or "", old_sent[:80], "", old_sent, repealed=True,
+                                 clause=m["num"], repeal_text=line))
     return out
 
 
@@ -330,7 +335,8 @@ def critic_negation(d: Draft, docs: list[Document], question: str, amendments: l
     if says_no and not neg and not ev_neg and not numbers(d.answer):
         return [Issue("negation", f"ответ «{d.answer}» утверждает, что требования нет, но в цитате «{d.quote[:120]}» "
                                   f"нет отрицания. Приведи фразу документа, где сказано, что требование не установлено, "
-                                  f"или ответь значением из документа")]
+                                  f"или ответь значением из документа. Если в документах про этот параметр ничего нет — "
+                                  f"status «нет в документах»")]
     return []
 
 

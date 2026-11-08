@@ -6,6 +6,7 @@
 import asyncio
 import csv
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from app.ingest import load_package, load_questions
 from app.pipeline.base import Context, get_pipeline
 from app.schemas import Answer, Question, Status, TraceStep
 from app.verify import guard
+
+log = logging.getLogger("runs")
 
 FIELDS = ["id", "status", "answer", "quote", "file"]
 PROGRESS: dict[str, dict] = {}   # run_id -> {"done", "total", "status"}
@@ -42,11 +45,20 @@ def make_context(roles: dict[str, str] | None = None, options: dict | None = Non
     return Context(models=models, options={**STRATEGIES.get(strategy, {}), **merged})
 
 
+def question_timeout(ctx: Context) -> float:
+    """Лимит на вопрос. Map-reduce читает до map_max_chunks фрагментов — по запросу на каждый,
+    поэтому лимит растёт с их числом (на 30 фрагментов — втрое), а не один на весь вопрос."""
+    t = settings.question_timeout_s
+    if ctx.options.get("map_extract"):
+        t *= max(1.0, int(ctx.options.get("map_max_chunks", 30)) / 10)
+    return t
+
+
 async def answer_one(pipeline, q: Question, data_dir: Path, ctx: Context, use_guard: bool = True) -> Answer:
     docs = list(load_package(data_dir, q.package))
     t0 = time.perf_counter()
     try:
-        ans = await asyncio.wait_for(pipeline.answer(q, docs, ctx), settings.question_timeout_s)
+        ans = await asyncio.wait_for(pipeline.answer(q, docs, ctx), question_timeout(ctx))
         ans.id = q.id
     except Exception as e:  # прогон контрольного набора не должен падать из-за одного вопроса
         ans = Answer(id=q.id, status=Status.UNKNOWN,
@@ -128,6 +140,9 @@ async def _answer_all(pipeline, questions: list[Question], data_dir: Path, ctx: 
         if run_id in PROGRESS:
             PROGRESS[run_id].update(status=f"retry {rnd}: {len(failed)} упавших")
         await asyncio.sleep(pause)
+        if "answer" in ctx.models and not await llm.wait_ready(ctx.models["answer"]):
+            log.warning("API так и не ответил — повтор упавших отложен: python -m app.cli resume %s", run_id)
+            break
         again = await asyncio.gather(*(task(questions[i]) for i in failed))
         for i, a in zip(failed, again):
             a.trace.insert(0, TraceStep(node="retry_run", ok=not is_failed(a),

@@ -674,7 +674,17 @@ def test_map_replaces_hidden_old_clause_with_amendment(monkeypatch):
     asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Сколько контрактов нужно для опыта?"),
                                        NUM_AMEND_DOCS, ctx))
     shown = seen[-1].split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
-    assert "признан утратившим силу" in shown and "300 000" not in shown
+    # дословная строка отмены (её можно цитировать) + что именно отменено, но не отдельной строкой-цитатой
+    assert "«2. Пункт 2.6 извещения признать утратившим силу.»" in shown and "пункт отменён" in shown
+    assert not any(l.startswith("- (01_izveshchenie.txt)") for l in shown.splitlines())
+
+
+def test_llm_critic_sees_repealed_clause_text():
+    from app.pipeline.agent.graph import _evidence_text
+    d = Draft(status="ответ", answer="не требуется", quote="Пункт 2.6 извещения признать утратившим силу",
+              file="05_izmeneniya_izveshcheniya.txt")
+    text = _evidence_text(d, NUM_AMEND_DOCS)
+    assert "утратившим силу" in text and "не менее 2 контрактов" in text
 
 
 def test_absent_with_repealed_clause_hints_not_required():

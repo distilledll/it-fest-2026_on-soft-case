@@ -151,10 +151,12 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
         if old_by:
             if map_mode:          # в map-reduce старую редакцию не показываем, а подставляем то, что её заменило
                 stale += 1
-                repl = (f"Пункт {old_by.clause} признан утратившим силу" if old_by.repealed else old_by.new_text)
+                repl = old_by.repeal_text if old_by.repealed else old_by.new_text
                 if repl and repl.lower() not in seen:
                     seen.add(repl.lower())
-                    lines.append(f"- ({old_by.amend_file}) [ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ, заменяет старую редакцию] «{repl}»")
+                    note = (f"пункт отменён, требования больше нет; отменённый текст: «{text}»" if old_by.repealed
+                            else "заменяет старую редакцию")
+                    lines.append(f"- ({old_by.amend_file}) [ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ, {note}] «{repl}»")
                     kept += 1
                 continue
             tags.append("[СТАРАЯ РЕДАКЦИЯ]")
@@ -477,8 +479,18 @@ def _evidence(raw) -> list[dict]:
 
 
 def _evidence_text(d: Draft, docs: list[Document]) -> str:
+    from app.pipeline.agent.critics import parse_amendments
     from app.verify import quote_exists
     rows = [f"- {e['file']}: «{e['quote']}» → {e['value']}" for e in d.evidence if quote_exists(e["quote"], docs)]
+    # цитата — строка изменения извещения: критик должен видеть, что именно было отменено или заменено,
+    # иначе «пункт 2.6 утратил силу» для него не связан с параметром из вопроса
+    cited = norm(" ".join([d.quote] + [e["quote"] for e in d.evidence]))
+    for a in parse_amendments(docs):
+        mark = norm(a.repeal_text if a.repealed else a.new_text)
+        if mark and a.old_sentence and (mark in cited or (cited and cited in mark)):
+            what = "признан утратившим силу" if a.repealed else "изложен в новой редакции"
+            rows.append(f"- пункт {a.clause or '?'} ({a.target_file}) {what} изменением ({a.amend_file}); "
+                        f"старая редакция: «{a.old_sentence}»")
     return "\n".join(rows) or "(не приведены)"
 
 
