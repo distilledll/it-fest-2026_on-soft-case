@@ -360,6 +360,38 @@ def test_outage_gives_up_after_limit(monkeypatch):
     assert 60 <= clock["t"] < 200
 
 
+def test_client_is_reused_between_calls():
+    """Один клиент на подключение — соединения переиспользуются, а не открываются на каждый запрос."""
+    prof = ModelProfile(id="r", name="r", base_url="http://x/v1", model="m")
+
+    async def two():
+        return prof.client() is prof.client()
+    assert asyncio.run(two())
+
+
+def test_requests_are_throttled(monkeypatch):
+    from app.config import settings
+    clock, sleeps = {"t": 0.0}, []
+
+    async def fake_sleep(s):
+        sleeps.append(round(s, 3))
+        clock["t"] += s
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm, "_now", lambda: clock["t"])
+    monkeypatch.setattr(settings, "llm_rps", 2)
+    monkeypatch.setitem(llm._rate, "next", 0.0)
+
+    async def ok():
+        return "ok"
+
+    async def five():
+        for _ in range(5):
+            await llm.call(ok)
+    asyncio.run(five())
+    assert clock["t"] == 2.0 and sleeps == [0.5, 0.5, 0.5, 0.5]       # 5 запросов при 2/с — за 2 с
+
+
 def test_number_in_words_and_years_to_months():
     docs = [doc("01.txt", "Обеспечение заявки предоставляется в размере пятидесяти тысяч рублей.\n"
                           "Гарантийный срок составляет 2 (два) года.\n")]

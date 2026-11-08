@@ -14,6 +14,7 @@ import threading
 import uuid
 from typing import Any, Literal
 
+import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
 from pydantic import BaseModel, Field, model_validator
 
@@ -74,8 +75,22 @@ class ModelProfile(BaseModel):
         return out
 
     def client(self) -> AsyncOpenAI:
-        return AsyncOpenAI(base_url=self.base_url, api_key=self.resolve_key() or "none",
-                           default_headers=self.headers(), timeout=settings.llm_timeout_s, max_retries=0)
+        """Один клиент на подключение (и event loop): соединения с API переиспользуются (keep-alive).
+        Новый клиент на каждый запрос — это новое TCP+TLS-соединение на каждый вызов модели: сотни
+        соединений в минуту с одного IP, и защита шлюза от DDoS блокирует IP на несколько минут."""
+        loop = asyncio.get_running_loop()
+        key = (id(loop), self.base_url, self.resolve_key(), self.extra_headers)
+        c = _clients.get(key)
+        if c is None:
+            n = max(settings.llm_concurrency, 1)
+            http = httpx.AsyncClient(limits=httpx.Limits(max_connections=n, max_keepalive_connections=n,
+                                                         keepalive_expiry=60),
+                                     timeout=settings.llm_timeout_s)
+            c = AsyncOpenAI(base_url=self.base_url, api_key=self.resolve_key() or "none",
+                            default_headers=self.headers(), timeout=settings.llm_timeout_s, max_retries=0,
+                            http_client=http)
+            _clients[key] = c
+        return c
 
     def body(self) -> dict:
         b = dict(self.extra_body)
@@ -155,6 +170,19 @@ RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServer
 # Обрыв связи/5xx — это шлюз лёг, а не один плохой запрос. Общая пауза на весь процесс: все запросы
 # ждут вместе (с растущей паузой) и продолжают, когда шлюз вернётся, а не сжигают каждый свои повторы.
 _outage = {"until": 0.0, "delay": 5.0}
+_clients: dict[tuple, AsyncOpenAI] = {}
+_rate = {"next": 0.0}
+
+
+async def _throttle() -> None:
+    """Не чаще llm_rps запросов в секунду на весь процесс (0 — без ограничения)."""
+    if settings.llm_rps <= 0:
+        return
+    now = _now()
+    at = max(now, _rate["next"])
+    _rate["next"] = at + 1.0 / settings.llm_rps
+    if at > now:
+        await asyncio.sleep(at - now)
 
 
 def _now() -> float:
@@ -181,6 +209,7 @@ async def call(fn, *args, **kw):
             await asyncio.sleep(pause)
             waited += pause
         async with _slot():
+            await _throttle()
             try:
                 result = await fn(*args, **kw)
                 _outage["delay"] = 5.0
