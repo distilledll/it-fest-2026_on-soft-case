@@ -39,6 +39,7 @@ class ProfilePatch(BaseModel):
     max_tokens: int | None = None
     disable_thinking: bool | None = None
     extra_body: dict | None = None
+    agent_options: dict | None = None
 
 
 @router.patch("/{pid}", response_model=out.ModelProfileOut)

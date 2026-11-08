@@ -65,6 +65,7 @@ class ModelProfileOut(Out):
     json_mode: bool = True
     reasoning_effort: str | None = None
     extra_body: dict = {}
+    agent_options: dict = Field(default_factory=dict, description="опции агента по умолчанию, напр. {\"strategy\": \"map\"}")
     has_key: bool = Field(description="ключ задан (сам ключ API никогда не отдаёт)")
 
 

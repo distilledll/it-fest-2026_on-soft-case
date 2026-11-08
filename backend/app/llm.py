@@ -37,6 +37,9 @@ class ModelProfile(BaseModel):
     json_mode: bool = True           # response_format={"type": "json_object"}, если API поддерживает
     reasoning_effort: str | None = None   # low | medium | high — для моделей с рассуждениями
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # опции агента по умолчанию для этой модели, напр. {"strategy": "map"} для слабых моделей;
+    # опции запроса/прогона их переопределяют
+    agent_options: dict[str, Any] = Field(default_factory=dict)
 
     def public(self) -> dict:
         d = self.model_dump(exclude={"api_key"})

@@ -18,6 +18,7 @@
   votes: int              голосование: сколько ответов сравнить на первой попытке (1 — выключено)
   map_extract: bool       с quote_first: модель читает закупку фрагментами (map), ответ — по проверенным выпискам (reduce)
   map_chunk_chars: int    размер фрагмента для map (2500); map_max_chunks — сколько фрагментов читать (8)
+  strategy: str           "full" (по умолчанию) | "map" (= quote_first + map_extract); можно задать в профиле модели
 """
 import asyncio
 import operator
@@ -112,9 +113,12 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     from app.ingest import is_injection
     from app.verify import quote_exists, snap_quote
 
-    calls = 1
-    if _opt(ctx, "map_extract", False):
-        got, calls = await _map_extract(state["question"], docs, ctx)
+    calls, coverage, stale = 1, "", 0
+    map_mode = bool(_opt(ctx, "map_extract", False))
+    if map_mode:
+        got, calls, read_all = await _map_extract(state["question"], docs, ctx)
+        coverage = ("Прочитаны ВСЕ фрагменты документов закупки." if read_all else
+                    "Прочитаны только фрагменты, отобранные поиском: если ответа нет — лучше «не знаю», чем «нет в документах».")
     else:
         raw = await llm.chat(ctx.model("answer"), json=True, messages=[
             {"role": "user", "content": prompts.EXTRACT.format(context=state["context"], question=state["question"])}])
@@ -144,6 +148,9 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
         if file in by_file and is_amendment_doc(by_file[file]):
             tags.append("[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]")
         if superseded_by(text, file, amendments):
+            if map_mode:          # в map-reduce старую редакцию вообще не показываем: слабая модель хватается за неё
+                stale += 1
+                continue
             tags.append("[СТАРАЯ РЕДАКЦИЯ]")
         lines.append(f"- ({file}) {' '.join(tags)} «{text}»")
         kept += 1
@@ -153,15 +160,17 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
             lines.append(f"- ({file}) [НАЙДЕНО КОДОМ: {field.title} = {v}] «{sent.strip()}»")
     rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
     msgs = [{"role": "user", "content": prompts.ANSWER_FROM_QUOTES.format(
-        quotes="\n".join(lines) or "(фрагменты не найдены)", question=state["question"], multipart_rule=rule)}]
+        quotes=(coverage + "\n" if coverage else "") + ("\n".join(lines) or "(фрагменты не найдены)"),
+        question=state["question"], multipart_rule=rule)}]
     mode = "по фрагментам" if _opt(ctx, "map_extract", False) else "сначала цитаты"
     step = TraceStep(node="extract", ok=kept > 0,
-                     message=f"{mode}: запросов {calls}, проверено {kept}, отброшено (нет в документах/инъекция) {dropped}",
+                     message=f"{mode}: запросов {calls}, проверено {kept}, отброшено (нет в документах/инъекция) {dropped}"
+                             + (f", старая редакция скрыта: {stale}" if stale else "") + (f". {coverage}" if coverage else ""),
                      data={"quotes": lines})
     return msgs, [step], calls
 
 
-async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[dict], int]:
+async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[dict], int, bool]:
     """Map: модель читает закупку небольшими фрагментами и по каждому выписывает дословные предложения.
     Узкая задача на коротком тексте — по силам и маленькой модели. Фрагменты обрабатываются параллельно.
     Если фрагментов больше map_max_chunks, сначала отбираем лучшие (BM25), изменения извещения — всегда."""
@@ -185,7 +194,8 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
                 break
             pos = max(end - overlap, pos + 1)
     limit = int(_opt(ctx, "map_max_chunks", 8))
-    if len(chunks) > limit:
+    read_all = len(chunks) <= limit
+    if not read_all:
         must = [c for c in chunks if is_amendment_doc(c[0])]
         rest = [c for c in chunks if not is_amendment_doc(c[0])]
         scores = retrieval.BM25([retrieval.tokens(t) for _, t in rest]).scores(retrieval.tokens(question))
@@ -210,7 +220,7 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
 
     found = await asyncio.gather(*(read(d, t) for d, t in chunks), return_exceptions=True)
     got = [q for r in found if isinstance(r, list) for q in r]
-    return got, len(chunks)
+    return got, len(chunks), read_all
 
 
 MONTH_DATE = re.compile(r"(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[яй]|июн\w*|июл\w*|август\w*|"

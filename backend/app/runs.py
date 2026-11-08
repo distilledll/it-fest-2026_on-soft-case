@@ -25,8 +25,21 @@ FIELDS = ["id", "status", "answer", "quote", "file"]
 PROGRESS: dict[str, dict] = {}   # run_id -> {"done", "total", "status"}
 
 
+STRATEGIES = {
+    # вся закупка (или фрагменты поиска, если не влезает) в одном запросе — для сильных моделей
+    "full": {},
+    # map-reduce: модель читает закупку фрагментами, ответ — по проверенным и размеченным выпискам
+    "map": {"quote_first": True, "map_extract": True},
+}
+
+
 def make_context(roles: dict[str, str] | None = None, options: dict | None = None) -> Context:
-    return Context(models=llm.resolve_roles(roles), options=options or {})
+    """Опции = стратегия (из профиля модели или запроса) + agent_options профиля роли answer + опции запроса."""
+    models = llm.resolve_roles(roles)
+    merged = dict(models["answer"].agent_options) if "answer" in models else {}
+    merged.update(options or {})
+    strategy = merged.get("strategy", "full")
+    return Context(models=models, options={**STRATEGIES.get(strategy, {}), **merged})
 
 
 async def answer_one(pipeline, q: Question, data_dir: Path, ctx: Context, use_guard: bool = True) -> Answer:

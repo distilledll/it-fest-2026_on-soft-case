@@ -621,3 +621,37 @@ def test_map_extract_reads_chunks_and_answers_from_evidence(monkeypatch):
     step = next(t for t in a.trace if t.node == "extract")
     assert "по фрагментам" in step.message and "проверено 1" in step.message
     assert "[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]" in seen[-1]                     # reduce видит размеченные выписки
+
+
+def test_strategy_from_model_profile():
+    from app import llm as L
+    from app.llm import Registry
+    from app.runs import make_context
+    L.save(Registry(profiles=[ModelProfile(id="weak", name="w", base_url="http://x", model="w",
+                                           agent_options={"strategy": "map"}),
+                              ModelProfile(id="strong", name="s", base_url="http://x", model="s")],
+                    roles={"answer": "strong"}))
+    assert make_context().options == {}
+    weak = make_context({"answer": "weak"}).options
+    assert weak["quote_first"] and weak["map_extract"]
+    assert make_context({"answer": "weak"}, {"strategy": "full"}).options.get("map_extract") is None
+
+
+def test_map_hides_old_redaction_and_reports_coverage(monkeypatch):
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            return json.dumps({"quotes": ["окончания срока подачи заявок: 24.11.2026 10:00",
+                                          "27.11.2026 10:00 (время московское)"]}, ensure_ascii=False)
+        return json.dumps({"status": "ответ", "answer": "27.11.2026 10:00", "quote": "27.11.2026 10:00 (время московское)",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    ctx = Context(models=CTX.models, options={"quote_first": True, "map_extract": True, "llm_critic": False})
+    asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="До какой даты принимаются заявки?"), DOCS, ctx))
+    reduce_prompt = seen[-1]
+    assert "24.11.2026" not in reduce_prompt.split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
+    assert "Прочитаны ВСЕ фрагменты" in reduce_prompt
