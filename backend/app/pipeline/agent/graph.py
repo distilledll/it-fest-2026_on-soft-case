@@ -14,6 +14,7 @@
   research: bool          в режиме фрагментов перед «нет в документах» — повторный поиск с другими запросами (True)
   retriever: str          "hybrid" (BM25 + эмбеддинги, по умолчанию) | "keyword" (для сравнения)
   rerank: bool            реранк фрагментов моделью (False — включать по замеру)
+  quote_first: bool       сначала модель выписывает фрагменты, код их проверяет и размечает, ответ — только по ним
 """
 import operator
 from typing import Annotated, Any, TypedDict
@@ -40,6 +41,7 @@ class State(TypedDict, total=False):
     pending_warns: list[Issue] # повторный warn, на который модель не отреагировала
     fragments: bool            # модель видит фрагменты, а не документы целиком
     researched: bool           # повторный поиск перед «нет в документах» уже был
+    quotes_ready: bool         # шаг «сначала цитаты» выполнен (опция quote_first)
     critic_ok: bool
     attempts: int
     llm_calls: int
@@ -95,13 +97,70 @@ async def decompose(state: State, config) -> dict:
             "trace": [TraceStep(node="decompose", ok=True, message=f"частей: {len(parts)}", data={"parts": parts})]}
 
 
+async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[dict], list[TraceStep], int]:
+    """Шаг А «сначала цитаты»: модель выписывает фрагменты, код проверяет и размечает их.
+    Возвращает новые messages для шага Б, шаги trace и число вызовов модели."""
+    from app.pipeline.agent import fields as F
+    from app.pipeline.agent.critics import parse_amendments, superseded_by, is_amendment_doc
+    from app.ingest import is_injection
+    from app.verify import quote_exists, snap_quote
+
+    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+        {"role": "user", "content": prompts.EXTRACT.format(context=state["context"], question=state["question"])}])
+    try:
+        got = [q for q in llm.parse_json(raw).get("quotes", []) if isinstance(q, dict)]
+    except (ValueError, TypeError, AttributeError):
+        got = []
+    amendments = parse_amendments(docs)
+    by_file = {d.file: d for d in docs}
+    lines, kept, dropped, seen = [], 0, 0, set()
+    for q in got:
+        text, file = str(q.get("quote") or ""), str(q.get("file") or "")
+        doc = quote_exists(text, docs)
+        if not doc:
+            snapped = snap_quote(text, docs)
+            if not snapped:
+                dropped += 1
+                continue
+            text, file = snapped
+        else:
+            file = doc.file
+        if is_injection(text) or text.lower() in seen:
+            dropped += 1
+            continue
+        seen.add(text.lower())
+        tags = []
+        if file in by_file and is_amendment_doc(by_file[file]):
+            tags.append("[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]")
+        if superseded_by(text, file, amendments):
+            tags.append("[СТАРАЯ РЕДАКЦИЯ]")
+        lines.append(f"- ({file}) {' '.join(tags)} «{text}»")
+        kept += 1
+    field = F.field_for(state["question"])
+    if field:
+        for v, file, sent in F.candidates(field, docs, lambda s, f: superseded_by(s, f, amendments) is not None)[:3]:
+            lines.append(f"- ({file}) [НАЙДЕНО КОДОМ: {field.title} = {v}] «{sent.strip()}»")
+    rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
+    msgs = [{"role": "user", "content": prompts.ANSWER_FROM_QUOTES.format(
+        quotes="\n".join(lines) or "(фрагменты не найдены)", question=state["question"], multipart_rule=rule)}]
+    step = TraceStep(node="extract", ok=kept > 0,
+                     message=f"сначала цитаты: проверено {kept}, отброшено (нет в документах/инъекция) {dropped}",
+                     data={"quotes": lines})
+    return msgs, [step], 1
+
+
 async def answer(state: State, config) -> dict:
-    _, ctx = _cfg(config)
+    docs, ctx = _cfg(config)
     prof = ctx.model("answer")
+    pre: list[TraceStep] = []
+    extra_calls = 0
+    if _opt(ctx, "quote_first", False) and not state.get("quotes_ready"):
+        msgs, pre, extra_calls = await _quote_first(state, docs, ctx)
+        state = {**state, "messages": msgs, "quotes_ready": True}
     raw = await llm.chat(prof, state["messages"], json=True)
     msgs = state["messages"] + [{"role": "assistant", "content": raw}]
-    upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1,
-           "critic_ok": False}
+    upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1 + extra_calls,
+           "critic_ok": False, "quotes_ready": state.get("quotes_ready", False)}
     try:
         j = llm.parse_json(raw)
         status = str(j.get("status", "не знаю")).strip().lower()
@@ -113,9 +172,9 @@ async def answer(state: State, config) -> dict:
     except (ValueError, TypeError) as e:
         issue = Issue("format", f"ответ не в формате JSON: {e}")
         return {**upd, "draft": None, "issues": [issue],
-                "trace": [TraceStep(node="answer", ok=False, message=issue.message, data={"raw": raw[:800]})]}
+                "trace": pre + [TraceStep(node="answer", ok=False, message=issue.message, data={"raw": raw[:800]})]}
     return {**upd, "draft": d, "issues": [],
-            "trace": [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
+            "trace": pre + [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
                                 data={"draft": d.__dict__, "model": prof.model})]}
 
 
@@ -183,7 +242,8 @@ async def research(state: State, config) -> dict:
     rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
     msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
             {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
-    return {"messages": msgs, "researched": True, "llm_calls": state["llm_calls"] + 1, "attempts": 0,
+    return {"messages": msgs, "researched": True, "quotes_ready": False, "context": context,
+            "llm_calls": state["llm_calls"] + 1, "attempts": 0,
             "warned": [], "trace": [TraceStep(node="research", ok=True,
                                               message=f"повторный поиск: {len(alts)} доп. запросов, фрагментов {info.get('chunks')}",
                                               data={"queries": alts, "files": info.get("files", [])})]}

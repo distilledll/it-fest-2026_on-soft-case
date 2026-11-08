@@ -512,3 +512,23 @@ def test_fields_critic():
     assert run_critics(d, DOCS, q) == [] and d.answer == "90000"     # calc поправил сам код
     d2 = Draft(status="ответ", answer="95000", quote="5 % от цены контракта", file="01_izveshchenie.txt")
     assert [i.critic for i in run_critics(d2, DOCS, q, enabled=["fields"])] == ["fields"]
+
+
+def test_quote_first_verifies_and_tags_quotes(monkeypatch):
+    calls = script(monkeypatch, [
+        {"quotes": [{"file": "01_izveshchenie.txt", "quote": "окончания срока подачи заявок: 24.11.2026 10:00"},
+                    {"file": "05_izmeneniya_izveshcheniya.txt", "quote": "27.11.2026 10:00 (время московское)"},
+                    {"file": "01_izveshchenie.txt", "quote": "заявки принимаются до 30 декабря"}]},
+        {"status": "ответ", "answer": "27.11.2026 10:00", "quote": "27.11.2026 10:00 (время московское)",
+         "file": "05_izmeneniya_izveshcheniya.txt"},
+    ])
+    ctx = Context(models=CTX.models, options={"quote_first": True, "llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(
+        Question(id="x", package="T", question="До какой даты и времени принимаются заявки?"), DOCS, ctx))
+    assert a.status == Status.ANSWER and a.answer == "27.11.2026 10:00" and a.llm_calls == 2
+    step = next(t for t in a.trace if t.node == "extract")
+    assert "проверено 2" in step.message and "отброшено" in step.message and "1" in step.message
+    prompt_b = calls[1][0]["content"]
+    assert "[СТАРАЯ РЕДАКЦИЯ]" in prompt_b and "[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]" in prompt_b
+    assert "30 декабря" not in prompt_b                       # выдуманный фрагмент не дошёл до модели
+    assert "[НАЙДЕНО КОДОМ: окончание подачи заявок = 27.11.2026 10:00]" in prompt_b
