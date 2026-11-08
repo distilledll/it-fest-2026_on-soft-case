@@ -507,7 +507,10 @@ def critic_absent(d: Draft, docs: list[Document], question: str, amendments: lis
     sents = [(doc.file, sent) for doc in docs for sent in _sentences(doc.text)]
     df = Counter(st for _, sent in sents for st in _stems(sent) & q_stems)
     idf = {st: math.log((len(sents) + 1) / (df.get(st, 0) + 1)) + 0.1 for st in q_stems}
-    total = sum(idf.values())
+    # слова вопроса, которых нет нигде в документах («размер», «цены»), не помогают найти место — не считаем их
+    total = sum(w for st, w in idf.items() if df.get(st))
+    if total <= 0:
+        return []
     best = None
     for file, sent in sents:
         if not has_negation(sent) or is_injection(sent) or superseded_by(sent, file, amendments):
