@@ -68,3 +68,18 @@ def test_upload_and_ask_without_questions():
     assert c.post("/api/runs", json={"dataset": did, "pipeline": "stub"}).status_code == 422
     assert c.post("/api/ask", json={"dataset": did, "package": "P01", "question": "Какой срок поставки?",
                                     "pipeline": "stub"}).status_code == 200
+
+
+@needs_sample
+def test_ladder_stub(monkeypatch):
+    """Лесенка из заглушек: шаги идут по порядку и попадают в /api/ladders."""
+    from app import runs as runs_mod
+    monkeypatch.setattr(runs_mod, "LADDER", [("baseline", "b", "stub", {}, False), ("full", "f", "stub", {}, True)])
+    lid = c.post("/api/ladders", json={"dataset": "sample"}).json()["ladder_id"]
+    for _ in range(200):
+        lad = next((x for x in c.get("/api/ladders").json() if x["id"] == lid), None)
+        if lad and len(lad["steps"]) == 2 and all(s["status"] == "done" for s in lad["steps"]):
+            break
+        time.sleep(0.1)
+    assert [s["step"] for s in lad["steps"]] == ["baseline", "full"]
+    assert lad["steps"][0]["index"] is not None and lad["steps"][0]["by_type"]

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 90.0     # таймаут одного запроса к API
     question_timeout_s: float = 600.0   # на весь вопрос, включая ожидание очереди и повторы
     max_upload_mb: int = 200
+    embed_dimensions: int = 256     # размерность эмбеддингов для поиска фрагментов (меньше — быстрее и легче кэш)
 
     @property
     def datasets_dir(self) -> Path:

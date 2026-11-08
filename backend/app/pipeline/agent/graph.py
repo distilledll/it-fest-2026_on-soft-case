@@ -9,8 +9,18 @@
   llm_critic: bool        включён ли критик-модель (по умолчанию True)
   max_attempts: int       сколько раз модель может отвечать (по умолчанию 3)
   context_chars: int      сколько символов документов влезает целиком (по умолчанию 60000)
+  multipart: bool         правило про вопросы из нескольких частей + числа подтверждаются любым evidence (True)
+  decompose: bool         отдельный запрос разбивает вопрос на подвопросы (False — включать по замеру)
+  research: bool          в режиме фрагментов перед «нет в документах» — повторный поиск с другими запросами (True)
+  retriever: str          "hybrid" (BM25 + эмбеддинги, по умолчанию) | "keyword" (для сравнения)
+  rerank: bool            реранк фрагментов моделью (False — включать по замеру)
+  quote_first: bool       сначала модель выписывает фрагменты, код их проверяет и размечает, ответ — только по ним
+  votes: int              голосование: сколько ответов сравнить на первой попытке (1 — выключено)
 """
+import asyncio
 import operator
+import re
+from collections import Counter
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -19,7 +29,7 @@ from app import llm
 from app.ingest import norm
 from app.pipeline.agent import prompts
 from app.pipeline.agent.context import build_context
-from app.pipeline.agent.critics import CRITICS, Draft, Issue, run_critics
+from app.pipeline.agent.critics import CRITICS, MULTIPART_CTX, Draft, Issue, run_critics
 from app.schemas import Document, Status, TraceStep
 
 STATUSES = {s.value for s in Status}
@@ -33,6 +43,10 @@ class State(TypedDict, total=False):
     issues: list[Issue]
     warned: list[str]          # по каким warn уже был повтор — второй раз не дёргаем
     pending_warns: list[Issue] # повторный warn, на который модель не отреагировала
+    fragments: bool            # модель видит фрагменты, а не документы целиком
+    researched: bool           # повторный поиск перед «нет в документах» уже был
+    quotes_ready: bool         # шаг «сначала цитаты» выполнен (опция quote_first)
+    vote: dict | None          # итог голосования (опция votes)
     critic_ok: bool
     attempts: int
     llm_calls: int
@@ -51,25 +65,154 @@ def _opt(ctx, key, default):
 
 async def prepare(state: State, config) -> dict:
     docs, ctx = _cfg(config)
-    context, info = build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000))
-    msgs = [{"role": "system", "content": prompts.SYSTEM},
+    context, info = await build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000))
+    rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
+    msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
             {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
     notes = [f"режим: {info['mode']}"]
     if info["redacted"]:
         notes.append(f"вырезано инструкций для ИИ: {info['redacted']}")
     if info["empty"]:
         notes.append(f"пустые файлы: {', '.join(info['empty'])}")
+    if info.get("chunks") is not None:
+        notes.append(f"фрагментов: {info['chunks']} из файлов {', '.join(info.get('files', []))}")
     return {"context": context, "messages": msgs, "attempts": 0, "llm_calls": 0, "warned": [],
+            "fragments": info["mode"] != "full", "researched": False,
             "trace": [TraceStep(node="prepare", ok=True, message="; ".join(notes), data=info)]}
 
 
-async def answer(state: State, config) -> dict:
+async def decompose(state: State, config) -> dict:
+    """Опция decompose: отдельный запрос разбивает вопрос на подвопросы, они добавляются в задание модели."""
     _, ctx = _cfg(config)
+    if not _opt(ctx, "decompose", False):
+        return {}
+    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+        {"role": "user", "content": prompts.DECOMPOSE.format(question=state["question"])}])
+    calls = state["llm_calls"] + 1
+    try:
+        parts = [str(x).strip() for x in llm.parse_json(raw).get("parts", []) if str(x).strip()]
+    except (ValueError, TypeError, AttributeError):
+        parts = []
+    if len(parts) < 2:
+        return {"llm_calls": calls, "trace": [TraceStep(node="decompose", ok=True, message="вопрос простой")]}
+    msgs = list(state["messages"])
+    msgs[-1] = {**msgs[-1], "content": msgs[-1]["content"] + prompts.DECOMPOSED.format(
+        parts="\n".join(f"{i}) {x}" for i, x in enumerate(parts, 1)))}
+    return {"messages": msgs, "llm_calls": calls,
+            "trace": [TraceStep(node="decompose", ok=True, message=f"частей: {len(parts)}", data={"parts": parts})]}
+
+
+async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[dict], list[TraceStep], int]:
+    """Шаг А «сначала цитаты»: модель выписывает фрагменты, код проверяет и размечает их.
+    Возвращает новые messages для шага Б, шаги trace и число вызовов модели."""
+    from app.pipeline.agent import fields as F
+    from app.pipeline.agent.critics import parse_amendments, superseded_by, is_amendment_doc
+    from app.ingest import is_injection
+    from app.verify import quote_exists, snap_quote
+
+    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+        {"role": "user", "content": prompts.EXTRACT.format(context=state["context"], question=state["question"])}])
+    try:
+        got = [q for q in llm.parse_json(raw).get("quotes", []) if isinstance(q, dict)]
+    except (ValueError, TypeError, AttributeError):
+        got = []
+    amendments = parse_amendments(docs)
+    by_file = {d.file: d for d in docs}
+    lines, kept, dropped, seen = [], 0, 0, set()
+    for q in got:
+        text, file = str(q.get("quote") or ""), str(q.get("file") or "")
+        doc = quote_exists(text, docs)
+        if not doc:
+            snapped = snap_quote(text, docs)
+            if not snapped:
+                dropped += 1
+                continue
+            text, file = snapped
+        else:
+            file = doc.file
+        if is_injection(text) or text.lower() in seen:
+            dropped += 1
+            continue
+        seen.add(text.lower())
+        tags = []
+        if file in by_file and is_amendment_doc(by_file[file]):
+            tags.append("[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]")
+        if superseded_by(text, file, amendments):
+            tags.append("[СТАРАЯ РЕДАКЦИЯ]")
+        lines.append(f"- ({file}) {' '.join(tags)} «{text}»")
+        kept += 1
+    field = F.field_for(state["question"])
+    if field:
+        for v, file, sent in F.candidates(field, docs, lambda s, f: superseded_by(s, f, amendments) is not None)[:3]:
+            lines.append(f"- ({file}) [НАЙДЕНО КОДОМ: {field.title} = {v}] «{sent.strip()}»")
+    rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
+    msgs = [{"role": "user", "content": prompts.ANSWER_FROM_QUOTES.format(
+        quotes="\n".join(lines) or "(фрагменты не найдены)", question=state["question"], multipart_rule=rule)}]
+    step = TraceStep(node="extract", ok=kept > 0,
+                     message=f"сначала цитаты: проверено {kept}, отброшено (нет в документах/инъекция) {dropped}",
+                     data={"quotes": lines})
+    return msgs, [step], 1
+
+
+def _vote_key(status: str, answer: str) -> str:
+    from app.verify import numbers
+    nums = sorted({round(x, 2) for x in numbers(answer)})
+    if nums:
+        return f"{status}|{nums}"
+    a = norm(answer)
+    if re.search(r"\bнет\b|не\s+(требует|установлен|предусмотрен)", a):
+        return f"{status}|нет"
+    if re.search(r"\bда\b", a):
+        return f"{status}|да"
+    return f"{status}|{re.sub(r'[^а-яa-z]', '', a)[:20]}"
+
+
+async def _vote(d: Draft, messages: list[dict], prof, votes: int, ctx) -> tuple[dict, TraceStep, int]:
+    """Голосование (самосогласованность): ещё votes−1 ответов с ненулевой температурой.
+    Возвращает {"top": ключ большинства, "agree": доля, "variants": [...]}."""
+    temp = float(_opt(ctx, "vote_temperature", 0.7))
+    raws = await asyncio.gather(*(llm.chat(prof, messages, json=True, temperature=temp) for _ in range(votes - 1)),
+                                return_exceptions=True)
+    variants = [(d.status, d.answer)]
+    for r in raws:
+        try:
+            j = llm.parse_json(r) if isinstance(r, str) else {}
+            if j:
+                variants.append((str(j.get("status", "")).strip().lower(), str(j.get("answer") or "")))
+        except (ValueError, TypeError):
+            continue
+    keys = Counter(_vote_key(s, a) for s, a in variants)
+    top, n = keys.most_common(1)[0]
+    vote = {"top": top, "agree": n / len(variants), "variants": variants}
+    step = TraceStep(node="votes", ok=vote["agree"] >= 2 / 3 and _vote_key(d.status, d.answer) == top,
+                     message=f"голосование: согласие {n} из {len(variants)}",
+                     data={"variants": [f"{s}: {a}" for s, a in variants]})
+    return vote, step, votes - 1
+
+
+def _vote_unreliable(vote: dict | None, d: Draft | None) -> bool:
+    return bool(vote and d and (vote["agree"] < 2 / 3 or _vote_key(d.status, d.answer) != vote["top"]))
+
+
+def _vote_issue(vote: dict) -> Issue:
+    alts = "; ".join(f"«{s}: {a[:60]}»" for s, a in vote["variants"])
+    return Issue("votes", f"при повторных запросах модель отвечает по-разному: {alts}. Перепроверь по документам и "
+                          f"выбери ответ, который подтверждается дословной цитатой", severity="warn",
+                 data={"variants": vote["variants"]})
+
+
+async def answer(state: State, config) -> dict:
+    docs, ctx = _cfg(config)
     prof = ctx.model("answer")
+    pre: list[TraceStep] = []
+    extra_calls = 0
+    if _opt(ctx, "quote_first", False) and not state.get("quotes_ready"):
+        msgs, pre, extra_calls = await _quote_first(state, docs, ctx)
+        state = {**state, "messages": msgs, "quotes_ready": True}
     raw = await llm.chat(prof, state["messages"], json=True)
     msgs = state["messages"] + [{"role": "assistant", "content": raw}]
-    upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1,
-           "critic_ok": False}
+    upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1 + extra_calls,
+           "critic_ok": False, "quotes_ready": state.get("quotes_ready", False)}
     try:
         j = llm.parse_json(raw)
         status = str(j.get("status", "не знаю")).strip().lower()
@@ -81,9 +224,15 @@ async def answer(state: State, config) -> dict:
     except (ValueError, TypeError) as e:
         issue = Issue("format", f"ответ не в формате JSON: {e}")
         return {**upd, "draft": None, "issues": [issue],
-                "trace": [TraceStep(node="answer", ok=False, message=issue.message, data={"raw": raw[:800]})]}
+                "trace": pre + [TraceStep(node="answer", ok=False, message=issue.message, data={"raw": raw[:800]})]}
+    votes = int(_opt(ctx, "votes", 1) or 1)
+    if votes > 1 and state["attempts"] == 0:
+        vote, vote_step, vote_calls = await _vote(d, state["messages"], prof, votes, ctx)
+        upd["llm_calls"] += vote_calls
+        upd["vote"] = vote
+        pre = pre + [vote_step]
     return {**upd, "draft": d, "issues": [],
-            "trace": [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
+            "trace": pre + [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
                                 data={"draft": d.__dict__, "model": prof.model})]}
 
 
@@ -93,8 +242,14 @@ async def check(state: State, config) -> dict:
     if d is None:
         return {}
     enabled = _opt(ctx, "critics", list(CRITICS))
-    issues = run_critics(d, docs, state["question"], enabled)
+    token = MULTIPART_CTX.set(bool(_opt(ctx, "multipart", True)))
+    try:
+        issues = run_critics(d, docs, state["question"], enabled)
+    finally:
+        MULTIPART_CTX.reset(token)
     # warn — один повтор на критика; если модель настаивает, оставляем её решение
+    if state["attempts"] == 1 and _vote_unreliable(state.get("vote"), d):
+        issues.append(_vote_issue(state["vote"]))
     fresh = [i for i in issues if i.severity == "error" or i.critic not in state["warned"]]
     warned = state["warned"] + [i.critic for i in fresh if i.severity == "warn"]
     # повторные warn не гоняют модель снова, но запоминаются: если ответ так и сдаётся — finalize решит
@@ -132,6 +287,28 @@ async def llm_critic(state: State, config) -> dict:
             "trace": [TraceStep(node="llm_critic", ok=False, message=problem)]}
 
 
+async def research(state: State, config) -> dict:
+    """Модель видела только фрагменты и сказала «нет в документах» — возможно, промахнулся поиск.
+    Просим другие формулировки, ищем шире и задаём вопрос заново."""
+    docs, ctx = _cfg(config)
+    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+        {"role": "user", "content": prompts.RESEARCH.format(question=state["question"])}])
+    try:
+        alts = [str(x) for x in llm.parse_json(raw).get("queries", []) if str(x).strip()][:3]
+    except (ValueError, TypeError, AttributeError):
+        alts = []
+    context, info = await build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000),
+                                        queries=[state["question"], *alts], k=20)
+    rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
+    msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
+            {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
+    return {"messages": msgs, "researched": True, "quotes_ready": False, "context": context,
+            "llm_calls": state["llm_calls"] + 1, "attempts": 0,
+            "warned": [], "trace": [TraceStep(node="research", ok=True,
+                                              message=f"повторный поиск: {len(alts)} доп. запросов, фрагментов {info.get('chunks')}",
+                                              data={"queries": alts, "files": info.get("files", [])})]}
+
+
 async def retry(state: State, config) -> dict:
     text = "\n".join(f"- [{i.critic}] {i.message}" for i in state["issues"])
     return {"messages": state["messages"] + [{"role": "user", "content": prompts.RETRY.format(issues=text)}],
@@ -141,8 +318,13 @@ async def retry(state: State, config) -> dict:
 async def finalize(state: State, config) -> dict:
     d = state.get("draft")
     # warn по расхождению, оставшийся после исчерпания попыток, — тоже не сдаём: пропущенное расхождение = обман
+    # Неразрешённое расхождение по собственным evidence модели — не сдаём. Подозрение от сверки кодом
+    # (crosscheck) — тоже, но только если критик-модель не подтвердил, что это другой параметр.
+    strict = ("conflict",) if state.get("critic_ok") else ("conflict", "crosscheck")
     errors = [i for i in state.get("issues", []) + state.get("pending_warns", [])
-              if i.severity == "error" or i.critic in ("conflict", "crosscheck")]
+              if i.severity == "error" or i.critic in strict]
+    if not errors and not state.get("critic_ok") and _vote_unreliable(state.get("vote"), d):
+        errors = [_vote_issue(state["vote"])]
     if d is None or errors:
         why = "; ".join(i.message for i in errors)[:300] or "нет корректного ответа"
         return {"final": Draft(status="не знаю"),
@@ -156,6 +338,10 @@ def after_check(state: State, config) -> str:
     _, ctx = _cfg(config)
     if state.get("issues"):
         return "retry" if state["attempts"] < _opt(ctx, "max_attempts", 3) else "finalize"
+    d = state.get("draft")
+    if (d and d.status == "нет в документах" and state.get("fragments") and not state.get("researched")
+            and _opt(ctx, "research", True)):
+        return "research"
     if _opt(ctx, "llm_critic", True) and not state.get("critic_ok"):
         return "llm_critic"
     return "finalize"
@@ -170,13 +356,15 @@ def after_critic(state: State, config) -> str:
 
 def build():
     g = StateGraph(State)
-    for name, fn in (("prepare", prepare), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
+    for name, fn in (("prepare", prepare), ("decompose", decompose), ("research", research), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
                      ("retry", retry), ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "prepare")
-    g.add_edge("prepare", "answer")
+    g.add_edge("prepare", "decompose")
+    g.add_edge("decompose", "answer")
     g.add_edge("answer", "check")
-    g.add_conditional_edges("check", after_check, ["retry", "llm_critic", "finalize"])
+    g.add_conditional_edges("check", after_check, ["retry", "research", "llm_critic", "finalize"])
+    g.add_edge("research", "answer")
     g.add_conditional_edges("llm_critic", after_critic, ["retry", "finalize"])
     g.add_edge("retry", "answer")
     g.add_edge("finalize", END)
@@ -191,7 +379,7 @@ def _evidence(raw) -> list[dict]:
     out = []
     for e in raw if isinstance(raw, list) else []:
         if isinstance(e, dict):
-            out.append({k: "" if e.get(k) is None else str(e.get(k)) for k in ("file", "quote", "value")})
+            out.append({k: "" if e.get(k) is None else str(e.get(k)) for k in ("file", "quote", "value", "part")})
     return out
 
 

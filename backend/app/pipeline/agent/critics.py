@@ -6,11 +6,14 @@
 Набор критиков включается через ctx.options["critics"] — так меряем вклад каждого.
 """
 import ast
+import math
+from collections import Counter
+from contextvars import ContextVar
 import operator
 import re
 from dataclasses import dataclass, field
 
-from app.ingest import norm
+from app.ingest import is_injection, norm
 from app.schemas import Document
 from app.numwords import word_numbers
 from app.verify import nearby, number_pool, numbers, quote_exists, snap_quote
@@ -71,6 +74,27 @@ class Amendment:
     old_prefix: str
     new_text: str
     old_sentence: str = ""     # полное старое предложение из целевого файла (если нашли)
+    repealed: bool = False     # пункт признан утратившим силу — требования больше нет
+    clause: str = ""           # номер пункта, если изменение ссылается на номер
+
+
+AMEND_NUM_RE = re.compile(
+    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[\w.\-]+)\)\s*)?[^«\n]{0,80}?"
+    r"изложить\s+в\s+(?:следующей|новой)\s+редакции:?\s*«(?P<new>.+?)»", re.M)
+REPEAL_RE = re.compile(
+    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[\w.\-]+)\)\s*)?[^\n]{0,80}?"
+    r"(?:признать|считать)\s+утратившим\s+силу", re.M)
+
+
+def _notice_file(docs: list[Document]) -> str | None:
+    return next((d.file for d in docs if "izveshch" in d.file.lower() and not is_amendment_doc(d)), None)
+
+
+def _clause_sentence(text: str, num: str) -> str:
+    for sent in _sentences(text):
+        if re.match(rf"\s*{re.escape(num)}\.?\s", sent):
+            return sent
+    return ""
 
 
 def is_amendment_doc(d: Document) -> bool:
@@ -93,24 +117,59 @@ def parse_amendments(docs: list[Document]) -> list[Amendment]:
                         a.old_sentence = sent
                         break
             out.append(a)
+        for m in AMEND_NUM_RE.finditer(d.text):
+            target = m["file"] or _notice_file(docs)
+            old_sent = _clause_sentence(by_file[target].text, m["num"]) if target in by_file else ""
+            out.append(Amendment(d.file, target or "", old_sent[:80], m["new"].strip(), old_sent, clause=m["num"]))
+        for m in REPEAL_RE.finditer(d.text):
+            target = m["file"] or _notice_file(docs)
+            old_sent = _clause_sentence(by_file[target].text, m["num"]) if target in by_file else ""
+            out.append(Amendment(d.file, target or "", old_sent[:80], "", old_sent, repealed=True, clause=m["num"]))
     return out
 
 
 def superseded_by(quote: str, file: str, amendments: list[Amendment]) -> Amendment | None:
-    """Цитата взята из старой редакции (в исходном файле или в «Пункт «…»» внутри изменений)?"""
+    """Цитата взята из старой редакции? Старая редакция — это пункт в исходном файле (в том числе
+    вместе с номером «2.5. …») или текст после «Пункт «…»» внутри самого файла изменений."""
     q = norm(quote)
     if not q:
         return None
     for a in amendments:
-        if a.old_sentence and q in norm(a.old_sentence) and file != a.amend_file:
-            return a
-        if q in norm(a.old_prefix) and q not in norm(a.new_text):
-            return a
+        prefix, old, new = norm(a.old_prefix), norm(a.old_sentence), norm(a.new_text)
+        if file != a.amend_file:
+            if old and (q in old or old in q):
+                return a
+            if len(prefix) >= 15 and prefix in q:
+                return a
+        else:
+            if q in prefix and q not in new:
+                return a
+            if len(prefix) >= 15 and prefix in q and new not in q:
+                return a
     return None
 
 
+CLAUSE_PREFIX = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s*")
+CLAUSE_REF = re.compile(r"(?:[Пп]ункт\w*|п\.|раздел\w*|приложени\w*)\s*№?\s*\d+(?:\.\d+)*", re.I)
+
+
+def _strip_refs(text: str) -> str:
+    """Убираем номера пунктов: «2.6. Требование…», «Пункт 2.6 извещения…» — это не значения параметра."""
+    return CLAUSE_REF.sub(" ", CLAUSE_PREFIX.sub("", text or ""))
+CLAUSE_NO = re.compile(r"^\d+(?:\.\d+)*\.?$")
+
+
 def _sentences(text: str) -> list[str]:
-    return [s for s in re.split(r"(?<=[.;])\s+|\n+", text) if s.strip()]
+    """Предложения; номер пункта («2.5.») не отрывается от текста пункта."""
+    out: list[str] = []
+    for part in re.split(r"(?<=[.;])\s+|\n+", text):
+        if not part.strip():
+            continue
+        if out and CLAUSE_NO.match(out[-1].strip()):
+            out[-1] = f"{out[-1]} {part}"
+        else:
+            out.append(part)
+    return out
 
 
 # ---------------------------------------------------------------- критики
@@ -133,9 +192,14 @@ def critic_quote(d: Draft, docs: list[Document], question: str, amendments: list
                   data={"quote": d.quote})]
 
 
+# опция multipart: числа ответа можно подтверждать любой проверенной цитатой из evidence (вопросы из нескольких
+# частей, где части в разных местах документов). ContextVar — чтобы параллельные вопросы не мешали друг другу.
+MULTIPART_CTX: ContextVar[bool] = ContextVar("multipart", default=True)
+
+
 def critic_number(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
     """Каждое число из ответа должно быть в цитате или рядом с ней в том же месте документа
-    (для расхождения — ещё и в подтверждённых evidence)."""
+    (для расхождения и вопросов из нескольких частей — ещё и в подтверждённых evidence)."""
     if d.status not in ("ответ", "расхождение") or is_calc(question):
         return []
     a_nums = numbers(d.answer)
@@ -143,7 +207,7 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
         return []
     around = nearby(d.quote, docs, d.file)
     pool = number_pool(around)
-    if d.status == "расхождение":
+    if d.status == "расхождение" or MULTIPART_CTX.get():
         for e in d.evidence:
             if quote_exists(e.get("quote", ""), docs):
                 ev = nearby(e["quote"], docs, e.get("file", ""))
@@ -153,8 +217,9 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
         return [Issue("number", f"для значений {missing} нет подтверждающей цитаты — добавь в evidence "
                                 f"дословную цитату для каждого значения расхождения", data={"missing": missing})]
     if missing:
+        hint = " (если вопрос из нескольких частей — приведи в evidence цитату на каждую часть)" if MULTIPART_CTX.get() else ""
         return [Issue("number", f"чисел {missing} нет в цитате «{d.quote[:120]}» — возьми число из цитаты "
-                                f"или приведи цитату, где оно есть", data={"missing": missing})]
+                                f"или приведи цитату, где оно есть{hint}", data={"missing": missing})]
     return []
 
 
@@ -163,6 +228,11 @@ def critic_amendment(d: Draft, docs: list[Document], question: str, amendments: 
     if not amendments or d.status in ("нет в документах", "не знаю"):
         return []
     a = superseded_by(d.quote, d.file, amendments)
+    if a and a.repealed:
+        return [Issue("amendment",
+                      f"цитата из пункта {a.clause}, который признан утратившим силу в {a.amend_file} — этого требования "
+                      f"больше нет. Ответь «не требуется» и процитируй фразу об утрате силы",
+                      data={"old": a.old_sentence, "file": a.amend_file, "repealed": True})]
     if a:
         return [Issue("amendment",
                       f"цитата из старой редакции, этот пункт изменён в {a.amend_file}. "
@@ -184,18 +254,31 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
     live = []
     for e in d.evidence:
         q, f = e.get("quote", ""), e.get("file", "")
-        if not quote_exists(q, docs) or superseded_by(q, f, amendments):
+        if not quote_exists(q, docs) or superseded_by(q, f, amendments) or is_injection(nearby(q, docs, f, width=80)):
             continue
-        nums = numbers(e.get("value", "")) or numbers(q)
+        # значение — из поля value; из цитаты только без номера пункта («2.6. Требование…» — не значение 2.6)
+        nums = numbers(_strip_refs(e.get("value", ""))) or numbers(_strip_refs(q))
         if nums:
-            live.append((f, nums[0], q))
-    distinct = {v for _, v, _ in live}
-    files = {f for f, _, _ in live}
+            live.append((f, nums[0], q, str(e.get("part") or "1")))
+    distinct = {v for _, v, _, _ in live}
+    files = {f for f, _, _, _ in live}
     if d.status == "ответ" and len(distinct) > 1 and len(files) > 1:
-        desc = "; ".join(f"{v:g} в {f} («{q[:60]}»)" for f, v, q in live)
-        return [Issue("conflict", f"в документах разные значения: {desc}. Если это один и тот же параметр — "
-                                  f"статус «расхождение» и оба значения в answer", severity="warn",
-                      data={"values": sorted(distinct)})]
+        # сравниваем только упоминания одной и той же части вопроса (вопрос из нескольких частей — не расхождение)
+        groups: dict[str, list] = {}
+        for row in live:
+            groups.setdefault(row[3], []).append(row)
+        a_nums = numbers(d.answer)
+        answered_all = all(any(abs(v - a) < 0.01 for a in a_nums) for v in distinct)
+        for rows in groups.values():
+            vals, fls = {r[1] for r in rows}, {r[0] for r in rows}
+            if len(vals) < 2 or len(fls) < 2:
+                continue
+            if len(groups) == 1 and MULTIPART_CTX.get() and answered_all and ";" in d.answer:
+                continue   # части не размечены, но ответ уже содержит все значения по частям
+            desc = "; ".join(f"{v:g} в {f} («{q[:60]}»)" for f, v, q, _ in rows)
+            return [Issue("conflict", f"в документах разные значения: {desc}. Если это один и тот же параметр — "
+                                      f"статус «расхождение» и оба значения в answer", severity="warn",
+                          data={"values": sorted(vals)})]
     if d.status == "расхождение":
         a_nums = set(numbers(d.answer))
         if len(a_nums) < 2:
@@ -253,7 +336,7 @@ def critic_calc(d: Draft, docs: list[Document], question: str, amendments: list[
 
 # Только сроки: на деньгах и процентах слишком много соседних параметров (обеспечение заявки vs контракта).
 UNIT_RE = re.compile(r"\d[\d  ]*\)?\s*(?:\([^)]{1,40}\)\s*)?(календарн\w*\s+дн\w*|рабоч\w*\s+дн\w*|месяц\w*)", re.IGNORECASE)
-STOP_STEMS = {"какой", "какая", "каков", "сколь", "должн", "нужно", "ответ", "рубля", "проце", "кален", "днях",
+STOP_STEMS = {"какой", "какая", "каков", "сколь", "должн", "нужно", "ответ", "рубля", "проце", "кален", "днях", "дней",
               "месяц", "минима", "макси", "котор", "если", "цене", "участ"}
 
 
@@ -261,9 +344,20 @@ def _stems(text: str) -> set[str]:
     return {w.lower()[:5] for w in re.findall(r"[а-яё]{4,}", text, re.IGNORECASE)} - STOP_STEMS
 
 
+def _quote_sentence(d: Draft, docs: list[Document]) -> str:
+    q = norm(d.quote)
+    for doc in sorted(docs, key=lambda x: x.file != d.file):
+        for sent in _sentences(doc.text):
+            if q and q in norm(sent):
+                return sent
+    return d.quote
+
+
 def critic_crosscheck(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
     """Сверка кодом, без опоры на evidence от модели: ищем в документах другие предложения про тот же
-    параметр (та же единица измерения + слова вопроса) с другим числом. Ловит пропущенное расхождение."""
+    параметр (та же единица измерения + те же редкие слова вопроса) с другим числом. Ловит пропущенное
+    расхождение. Похожесть — с весами по редкости слов (IDF): «результаты работ», «документ о приёмке»
+    весят больше, чем «заказчик» и «рабочих дней», поэтому соседние пункты-отвлекалки не цепляются."""
     if d.status != "ответ" or is_calc(question) or is_yesno(question):
         return []
     a_nums = numbers(d.answer)
@@ -274,25 +368,105 @@ def critic_crosscheck(d: Draft, docs: list[Document], question: str, amendments:
         return []
     unit = m.group(1).lower()[:5]   # «кален» / «рабоч» / «месяц» — календарные и рабочие дни не смешиваем
     q_stems = _stems(question)
-    if len(q_stems) < 1:
+    if not q_stems:
+        return []
+    sents = [(doc.file, sent) for doc in docs for sent in _sentences(doc.text)]
+    df = Counter(st for _, sent in sents for st in _stems(sent) & q_stems)
+    idf = {st: math.log((len(sents) + 1) / (df.get(st, 0) + 1)) + 0.1 for st in q_stems}
+
+    def weight(text: str) -> float:
+        return sum(idf[st] for st in _stems(text) & q_stems)
+
+    base = weight(_quote_sentence(d, docs))
+    if base <= 0:
         return []
     found = []
-    for doc in docs:
-        for sent in _sentences(doc.text):
-            if superseded_by(sent, doc.file, amendments) or any(norm(sent) in norm(a.old_prefix) for a in amendments):
-                continue
-            um = [x for x in UNIT_RE.finditer(sent) if x.group(1).lower()[:5] == unit]
-            if not um or len(q_stems & _stems(sent)) < min(2, len(q_stems)):
-                continue
-            vals = [v for x in um for v in numbers(_words_to_digits(x.group(0))) + numbers(x.group(0))]
-            other = [v for v in vals if not any(abs(v - a) < 0.01 for a in a_nums)]
-            if other and not any(abs(v - a) < 0.01 for v in vals for a in a_nums):
-                found.append((doc.file, other[0], sent.strip()[:160]))
+    for file, sent in sents:
+        if (superseded_by(sent, file, amendments) or is_injection(sent)
+                or any(norm(sent) in norm(a.old_prefix) for a in amendments)):
+            continue
+        um = [x for x in UNIT_RE.finditer(sent) if x.group(1).lower()[:5] == unit]
+        if not um or weight(sent) < 0.8 * base:
+            continue
+        vals = [v for x in um for v in numbers(_words_to_digits(x.group(0))) + numbers(x.group(0))]
+        other = [v for v in vals if not any(abs(v - a) < 0.01 for a in a_nums)]
+        if other and not any(abs(v - a) < 0.01 for v in vals for a in a_nums):
+            found.append((file, other[0], sent.strip()[:160]))
     if found:
         desc = "; ".join(f"{v:g} в {f}: «{s}»" for f, v, s in found[:3])
         return [Issue("crosscheck", f"в документах есть другие значения этого параметра: {desc}. Если это тот же "
                                     f"параметр — статус «расхождение», оба значения в answer и цитаты в evidence",
                       severity="warn", data={"found": found[:3]})]
+    return []
+
+
+QUANT_Q = re.compile(r"\b(сколько|скольких|какой\s+(размер|срок|объ[её]м|процент|минимальн)|какая\s+(цена|сумма|"
+                     r"начальн|минимальн)|какое\s+количество)|в\s+(рублях|процентах|месяцах|днях|календарных|рабочих)", re.I)
+DATE_Q = re.compile(r"до\s+какой\s+даты|какая\s+дата|какого\s+числа", re.I)
+NEG_ANSWER = re.compile(r"\bнет\b|\bне\s+(требует|установлен|предусмотрен|предъявля|устанавлива|нужн)|отсутству|утратил",
+                        re.I)
+
+
+def critic_shape(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
+    """Форма ответа совпадает с вопросом: «сколько / какой размер» → число, «до какой даты» → дата,
+    «да или нет» → да/нет. Иначе модель отвечает словами из документа («в количестве, достаточном…»)
+    там, где ответа нет — это обман."""
+    if d.status != "ответ":
+        return []
+    ans = d.answer or ""
+    if NEG_ANSWER.search(ans):
+        return []
+    if is_yesno(question):
+        if not re.search(r"\b(да|нет)\b", norm(ans)):
+            return [Issue("shape", "вопрос «да или нет», а в ответе нет ни «да», ни «нет»")]
+        return []
+    if DATE_Q.search(question) and not re.search(r"\d{1,2}\.\d{1,2}\.\d{4}", ans):
+        return [Issue("shape", "вопрос о дате, а в ответе нет даты в виде ДД.ММ.ГГГГ. Если даты в документах нет — "
+                               "status «нет в документах»")]
+    if QUANT_Q.search(question) and not number_pool(ans):
+        return [Issue("shape", "вопрос о количестве, сумме или сроке, а в ответе нет числа. Если конкретного числа в "
+                               "документах нет — status «нет в документах»; если требования нет — «не требуется»")]
+    return []
+
+
+def critic_fields(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
+    """Второе мнение без модели: извлекатели типовых полей (НМЦК, обеспечение, срок, дата, гарантия)
+    и проверочное правило «обеспечение исполнения в рублях = процент × НМЦК»."""
+    from app.pipeline.agent import fields as F
+
+    def stale(sent: str, file: str) -> bool:
+        return superseded_by(sent, file, amendments) is not None
+
+    if is_calc(question):
+        if d.status != "ответ" or not F.SEC_EXEC_Q.search(question):
+            return []
+        nmck, pct = F.unique(F.BY_KEY["nmck"], docs, stale), F.unique(F.BY_KEY["contract_security_pct"], docs, stale)
+        if not (nmck and pct):
+            return []
+        expected = round(float(nmck[0]) * float(pct[0]) / 100, 2)
+        if not any(abs(expected - a) < 0.01 for a in numbers(d.answer)):
+            return [Issue("fields", f"по документам НМЦК {nmck[0]} × {pct[0]} % = {_fmt(expected)} руб. "
+                                    f"(«{nmck[1][:70]}», «{pct[1][:70]}»), а в ответе {d.answer}",
+                          data={"expected": expected})]
+        return []
+    field = F.field_for(question)
+    if not field or d.status == "не знаю":
+        return []
+    cands = F.candidates(field, docs, stale)
+    vals = {v for v, _, _ in cands}
+    if len(vals) == 1:
+        v, file, sent = cands[0]
+        if d.status == "нет в документах":
+            return [Issue("fields", f"в документах есть {field.title}: {v} («{sent[:120]}», {file}) — ответ есть",
+                          severity="warn", data={"value": v, "file": file})]
+        if d.status == "ответ" and not F.answer_has(field, v, d.answer):
+            return [Issue("fields", f"код нашёл в документах {field.title}: {v} («{sent[:120]}», {file}), "
+                                    f"а в ответе «{d.answer}» — проверь", severity="warn",
+                          data={"value": v, "file": file})]
+    elif len(vals) > 1 and d.status == "ответ" and len({f for _, f, _ in cands}) > 1:
+        desc = "; ".join(f"{v} в {f} («{s_[:60]}»)" for v, f, s_ in cands[:4])
+        return [Issue("fields", f"код нашёл разные значения поля «{field.title}»: {desc}. Возможно, это расхождение",
+                      severity="warn", data={"values": sorted(vals)})]
     return []
 
 
@@ -304,6 +478,8 @@ CRITICS = {
     "crosscheck": critic_crosscheck,
     "negation": critic_negation,
     "calc": critic_calc,
+    "shape": critic_shape,
+    "fields": critic_fields,
 }
 
 

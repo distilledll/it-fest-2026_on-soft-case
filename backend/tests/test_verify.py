@@ -41,3 +41,9 @@ def test_guard_accepts_words_and_years():
     assert guard(a, [d], "Размер обеспечения заявки?").status == Status.ANSWER
     b = Answer(id="y", status=Status.ANSWER, answer="24", quote="Гарантийный срок 2 (два) года", file="01.txt")
     assert guard(b, [d], "Гарантийный срок, в месяцах?").status == Status.ANSWER
+
+
+def test_number_pool_scales():
+    from app.verify import number_pool
+    assert 1250000 in number_pool("НМЦК: 1 250 тыс. руб.")
+    assert 2500000 in number_pool("составляет 2,5 млн рублей")

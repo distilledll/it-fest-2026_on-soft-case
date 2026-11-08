@@ -60,7 +60,7 @@ def new_run_id() -> str:
 
 async def run_set(dataset_id: str, pipeline_name: str, label: str = "", use_guard: bool = True,
                   roles: dict[str, str] | None = None, options: dict | None = None,
-                  run_id: str | None = None) -> dict:
+                  run_id: str | None = None, ladder: dict | None = None) -> dict:
     data_dir = datasets.path_of(dataset_id)
     run_id = run_id or new_run_id()
     out = settings.runs_dir / run_id
@@ -70,6 +70,9 @@ async def run_set(dataset_id: str, pipeline_name: str, label: str = "", use_guar
     questions = load_questions(data_dir)
     meta = _meta(run_id, dataset_id, pipeline_name, label, use_guard, ctx)
     meta["n"] = len(questions)
+    meta["dataset_name"] = datasets.info(dataset_id).get("name", dataset_id)
+    if ladder:
+        meta["ladder"] = ladder
     _write_meta(out, meta)
     PROGRESS[run_id] = {"done": 0, "total": len(questions), "status": "running"}
     sem = asyncio.Semaphore(settings.max_concurrency)
@@ -159,3 +162,48 @@ def list_runs() -> list[dict]:
         m.get("score", {}).pop("report", None)
         out.append(m)
     return out
+
+
+# ---------------------------------------------------------------- лесенка «было → стало»
+
+LADDER = [
+    # step,      подпись для графика,            пайплайн,   опции,                                                guard
+    ("baseline", "Baseline «как есть»",          "baseline", {},                                                   False),
+    ("prompt",   "Промпт агента",                "agent",    {"critics": [], "llm_critic": False, "max_attempts": 1}, False),
+    ("critics",  "+ критики кодом и повторы",    "agent",    {"llm_critic": False},                                True),
+    ("full",     "+ критик-модель (полный агент)", "agent",  {},                                                   True),
+]
+
+
+async def run_ladder(dataset_id: str, roles: dict[str, str] | None = None, steps: list[str] | None = None,
+                     ladder_id: str | None = None) -> str:
+    """Все слои на одном датасете и одной модели — данные для графика вклада каждого слоя."""
+    ladder_id = ladder_id or new_run_id()
+    for order, (step, title, pipeline, options, use_guard) in enumerate(LADDER):
+        if steps and step not in steps:
+            continue
+        await run_set(dataset_id, pipeline, f"{title}", use_guard, roles, options,
+                      ladder={"id": ladder_id, "step": step, "title": title, "order": order})
+    return ladder_id
+
+
+def list_ladders() -> list[dict]:
+    """Лесенки: для каждой — шаги с индексом, разбивкой и затратами (сразу в форме для графика)."""
+    by_id: dict[str, dict] = {}
+    for m in list_runs():
+        lad = m.get("ladder")
+        if not lad:
+            continue
+        entry = by_id.setdefault(lad["id"], {"id": lad["id"], "dataset": m["dataset"],
+                                             "dataset_name": m.get("dataset_name"), "models": m.get("models"),
+                                             "steps": []})
+        s = m.get("score", {})
+        entry["steps"].append({
+            "step": lad["step"], "title": lad["title"], "order": lad["order"], "run_id": m["run_id"],
+            "status": m["status"], "index": s.get("index"), "correct": s.get("correct"),
+            "careful": s.get("careful"), "lies": s.get("lies"), "n": m.get("n"), "by_type": s.get("by_type", {}),
+            "llm_calls": m.get("llm_calls"), "elapsed_s": m.get("elapsed_s"),
+        })
+    for e in by_id.values():
+        e["steps"].sort(key=lambda x: x["order"])
+    return sorted(by_id.values(), key=lambda e: e["id"], reverse=True)
