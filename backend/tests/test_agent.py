@@ -315,6 +315,83 @@ def test_timeouts_are_not_retried_forever(monkeypatch):
     assert n["c"] == 3
 
 
+def test_outage_waits_for_gateway_instead_of_failing(monkeypatch):
+    """Шлюз лежит несколько минут: запрос ждёт общую паузу и проходит, когда связь вернулась."""
+    import httpx
+    from openai import APIConnectionError
+    clock, sleeps = {"t": 0.0}, []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm, "_now", lambda: clock["t"])
+    n = {"c": 0}
+
+    async def down_for_a_while():
+        n["c"] += 1
+        if clock["t"] < 100:                       # ~100 с простоя: больше, чем старые «2 повтора за 6 с»
+            raise APIConnectionError(request=httpx.Request("POST", "http://x"))
+        return "ok"
+
+    assert asyncio.run(llm.call(down_for_a_while)) == "ok"
+    assert sleeps[:3] == [5.0, 10.0, 20.0] and clock["t"] >= 100
+
+
+def test_outage_gives_up_after_limit(monkeypatch):
+    import httpx
+    from openai import APIConnectionError
+    from app.config import settings
+    clock = {"t": 0.0}
+
+    async def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm, "_now", lambda: clock["t"])
+    monkeypatch.setattr(settings, "llm_outage_s", 60)
+
+    async def dead():
+        raise APIConnectionError(request=httpx.Request("POST", "http://x"))
+
+    with pytest.raises(APIConnectionError):
+        asyncio.run(llm.call(dead))
+    assert 60 <= clock["t"] < 200
+
+
+def test_client_is_reused_between_calls():
+    """Один клиент на подключение — соединения переиспользуются, а не открываются на каждый запрос."""
+    prof = ModelProfile(id="r", name="r", base_url="http://x/v1", model="m")
+
+    async def two():
+        return prof.client() is prof.client()
+    assert asyncio.run(two())
+
+
+def test_requests_are_throttled(monkeypatch):
+    from app.config import settings
+    clock, sleeps = {"t": 0.0}, []
+
+    async def fake_sleep(s):
+        sleeps.append(round(s, 3))
+        clock["t"] += s
+
+    monkeypatch.setattr(llm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(llm, "_now", lambda: clock["t"])
+    monkeypatch.setattr(settings, "llm_rps", 2)
+    monkeypatch.setitem(llm._rate, "next", 0.0)
+
+    async def ok():
+        return "ok"
+
+    async def five():
+        for _ in range(5):
+            await llm.call(ok)
+    asyncio.run(five())
+    assert clock["t"] == 2.0 and sleeps == [0.5, 0.5, 0.5, 0.5]       # 5 запросов при 2/с — за 2 с
+
+
 def test_number_in_words_and_years_to_months():
     docs = [doc("01.txt", "Обеспечение заявки предоставляется в размере пятидесяти тысяч рублей.\n"
                           "Гарантийный срок составляет 2 (два) года.\n")]
@@ -553,3 +630,166 @@ def test_votes_disagree_without_critic_is_unknown(monkeypatch):
                                            DOCS, ctx))
     assert a.status == Status.UNKNOWN                      # три разных ответа — без подтверждения не сдаём
     assert "critic_votes" in [t.node for t in a.trace]
+
+
+def test_weak_model_negation_without_negation_in_quote():
+    assert "negation" in crit("За сколько рабочих дней заказчик проверяет результаты?", status="ответ", answer="нет",
+                              quote="составляет 12 (двенадцать) месяцев", file="04_proekt_kontrakta.txt")
+    assert "negation" not in crit("Нужна ли лицензия ФСБ? Ответьте да или нет.", status="ответ", answer="нет",
+                                  quote="Требование о наличии лицензии ФСБ России к участникам настоящей закупки не установлено")
+
+
+def test_absent_claim_with_explicit_negation_in_docs():
+    assert crit("Нужна ли участнику лицензия ФСБ России? Ответьте да или нет.", status="нет в документах") == ["absent"]
+    assert crit("Какой срок действия банковской гарантии, в месяцах?", status="нет в документах") == []
+
+
+def test_absent_claim_against_field_extractor_is_error():
+    iss = run_critics(Draft(status="нет в документах"), DOCS, "Какая начальная (максимальная) цена контракта, в рублях?")
+    assert [(i.critic, i.severity) for i in iss] == [("fields", "error")]
+
+
+def test_multipart_question_is_not_conflict():
+    d = Draft(status="расхождение", answer="20; 36", quote="Срок поставки товара — 20 календарных дней",
+              file="01_izveshchenie.txt")
+    assert "multipart" in [i.critic for i in run_critics(d, MP_DOCS, MP_Q)]
+
+
+def test_auto_support_for_missing_number():
+    d = Draft(status="ответ", answer="20; 36", quote="Срок поставки товара — 20 календарных дней", file="01_izveshchenie.txt")
+    assert run_critics(d, MP_DOCS, MP_Q) == [] and any(e.get("part") == "auto" for e in d.evidence)
+
+
+def test_date_in_words_normalized():
+    from app.pipeline.agent.graph import normalize_answer
+    assert normalize_answer("до 10 часов 00 минут (по московскому времени) 27 ноября 2026 года") == "27.11.2026 10:00"
+    assert normalize_answer("27.11.2026 10:00") == "27.11.2026 10:00"
+    assert normalize_answer("5 марта 2027 года") == "05.03.2027"
+
+
+def test_calc_understands_thousands():
+    docs = [doc("01.txt", "Начальная (максимальная) цена контракта: 1 250 тыс. руб.\nОбеспечение исполнения контракта "
+                          "устанавливается в размере 5 % от цены контракта.\n")]
+    d = Draft(status="ответ", answer="62500", quote="5 % от цены контракта", file="01.txt", calc="1250000 * 5 / 100")
+    assert run_critics(d, docs, "Сколько рублей составит обеспечение исполнения контракта, если контракт заключат по НМЦК?") == []
+
+
+def test_map_extract_reads_chunks_and_answers_from_evidence(monkeypatch):
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            if "27.11.2026" in text:
+                return json.dumps({"quotes": ["Дата и время окончания срока подачи заявок: 27.11.2026 10:00 (время московское)."]},
+                                  ensure_ascii=False)
+            return json.dumps({"quotes": []})
+        return json.dumps({"status": "ответ", "answer": "27.11.2026 10:00", "quote": "27.11.2026 10:00 (время московское)",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    ctx = Context(models=CTX.models, options={"quote_first": True, "map_extract": True, "llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="До какой даты принимаются заявки?"),
+                                           DOCS, ctx))
+    assert a.status == Status.ANSWER and a.answer.startswith("27.11.2026")
+    chunk_calls = [t for t in seen if "ФРАГМЕНТ одного документа" in t]
+    assert len(chunk_calls) == 3                                   # три непустых файла — три фрагмента
+    step = next(t for t in a.trace if t.node == "extract")
+    assert "по фрагментам" in step.message and "проверено 1" in step.message
+    assert "[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]" in seen[-1]                     # reduce видит размеченные выписки
+
+
+def test_strategy_from_model_profile():
+    from app import llm as L
+    from app.llm import Registry
+    from app.runs import make_context
+    L.save(Registry(profiles=[ModelProfile(id="weak", name="w", base_url="http://x", model="w",
+                                           agent_options={"strategy": "map"}),
+                              ModelProfile(id="strong", name="s", base_url="http://x", model="s")],
+                    roles={"answer": "strong"}))
+    assert make_context().options == {"strategy": "auto"}
+    weak = make_context({"answer": "weak"}).options
+    assert weak["quote_first"] and weak["map_extract"]
+    assert make_context({"answer": "weak"}, {"strategy": "full"}).options.get("map_extract") is None
+
+
+def test_map_hides_old_redaction_and_reports_coverage(monkeypatch):
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            return json.dumps({"quotes": ["окончания срока подачи заявок: 24.11.2026 10:00",
+                                          "27.11.2026 10:00 (время московское)"]}, ensure_ascii=False)
+        return json.dumps({"status": "ответ", "answer": "27.11.2026 10:00", "quote": "27.11.2026 10:00 (время московское)",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    ctx = Context(models=CTX.models, options={"quote_first": True, "map_extract": True, "llm_critic": False})
+    asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="До какой даты принимаются заявки?"), DOCS, ctx))
+    reduce_prompt = seen[-1]
+    assert "24.11.2026" not in reduce_prompt.split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
+    assert "Прочитаны ВСЕ фрагменты" in reduce_prompt
+
+
+def test_map_replaces_hidden_old_clause_with_amendment(monkeypatch):
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            return json.dumps({"quotes": ["2.6. Участник должен иметь опыт исполнения не менее 2 контрактов стоимостью от 300 000,00 руб."]},
+                              ensure_ascii=False)
+        return json.dumps({"status": "ответ", "answer": "не требуется", "quote": "Пункт 2.6 извещения признать утратившим силу",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    ctx = Context(models=CTX.models, options={"quote_first": True, "map_extract": True, "llm_critic": False})
+    asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Сколько контрактов нужно для опыта?"),
+                                       NUM_AMEND_DOCS, ctx))
+    shown = seen[-1].split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
+    # дословная строка отмены (её можно цитировать) + что именно отменено, но не отдельной строкой-цитатой
+    assert "«2. Пункт 2.6 извещения признать утратившим силу.»" in shown and "пункт отменён" in shown
+    assert not any(l.startswith("- (01_izveshchenie.txt)") for l in shown.splitlines())
+
+
+def test_llm_critic_sees_repealed_clause_text():
+    from app.pipeline.agent.graph import _evidence_text
+    d = Draft(status="ответ", answer="не требуется", quote="Пункт 2.6 извещения признать утратившим силу",
+              file="05_izmeneniya_izveshcheniya.txt")
+    text = _evidence_text(d, NUM_AMEND_DOCS)
+    assert "утратившим силу" in text and "не менее 2 контрактов" in text
+
+
+def test_absent_with_repealed_clause_hints_not_required():
+    iss = run_critics(Draft(status="нет в документах", quote="Пункт 2.6 извещения признать утратившим силу",
+                            file="05_izmeneniya_izveshcheniya.txt"), NUM_AMEND_DOCS,
+                      "Сколько исполненных контрактов нужно для подтверждения опыта?")
+    assert [i.critic for i in iss] == ["absent"] and "утратившим силу" in iss[0].message
+
+
+def test_auto_map_when_package_does_not_fit(monkeypatch):
+    """strategy auto: закупка больше context_chars → граф идёт через узел map, а не через фрагменты поиска."""
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            return json.dumps({"quotes": ["2.3. Срок поставки товара — 25 календарных дней с даты заключения контракта."]},
+                              ensure_ascii=False)
+        return json.dumps({"status": "ответ", "answer": "15", "quote": "Срок поставки товара — 15 календарных дней",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    q = Question(id="x", package="T", question="Какой срок поставки?")
+    small = AgentPipeline().answer(q, NUM_AMEND_DOCS, Context(models=CTX.models, options={"llm_critic": False}))
+    a = asyncio.run(small)
+    assert "map" not in [s.node for s in a.trace]
+    big = Context(models=CTX.models, options={"llm_critic": False, "strategy": "auto", "context_chars": 100})
+    a = asyncio.run(AgentPipeline().answer(q, NUM_AMEND_DOCS, big))
+    assert "map" in [s.node for s in a.trace] and any("ФРАГМЕНТ" in s for s in seen)
+    assert a.answer == "15"

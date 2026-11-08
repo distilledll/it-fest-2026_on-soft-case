@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app import datasets
+from app.api import out
 from app.config import settings
 from app.datasets import DatasetError
 from app.pipeline.base import PIPELINES
@@ -26,7 +27,7 @@ class RunIn(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
-@router.post("", status_code=202)
+@router.post("", status_code=202, response_model=out.RunStarted)
 async def start_run(body: RunIn):
     try:
         info = datasets.info(body.dataset)
@@ -45,7 +46,7 @@ async def start_run(body: RunIn):
     return {"run_id": run_id}
 
 
-@router.get("")
+@router.get("", response_model=list[out.RunMeta])
 def runs():
     return list_runs()
 
@@ -57,7 +58,7 @@ def _dir(run_id: str):
     return d
 
 
-@router.get("/{run_id}")
+@router.get("/{run_id}", response_model=out.RunDetail)
 def run_detail(run_id: str):
     """По каждому вопросу: ответ, trace агента, вердикт check.py (верно/осторожно/обман + причина)."""
     d = _dir(run_id)
@@ -75,12 +76,12 @@ def run_detail(run_id: str):
     return {"meta": meta, "items": items}
 
 
-@router.get("/{run_id}/answers.csv")
+@router.get("/{run_id}/answers.csv", response_class=FileResponse, responses={200: {"description": "answers.csv для сдачи: UTF-8, разделитель `;`, колонки id;status;answer;quote;file", "content": {"text/csv": {"schema": {"type": "string"}}}}})
 def run_csv(run_id: str):
     return FileResponse(_dir(run_id) / "answers.csv", media_type="text/csv", filename="answers.csv")
 
 
-@router.get("/{run_id}/caught")
+@router.get("/{run_id}/caught", response_model=out.CaughtOut)
 def run_caught(run_id: str):
     """Пойманные обманы: первый черновик модели был обманом по check.py, итог — нет. Плюс ложные тревоги
     и вклад каждого критика. Материал для вопроса жюри «покажите обман, который система поймала»."""
@@ -89,7 +90,18 @@ def run_caught(run_id: str):
     return analyze(run_id)
 
 
-@router.get("/compare/{before}/{after}")
+@router.post("/{run_id}/resume", status_code=202, response_model=out.RunStarted)
+async def resume(run_id: str):
+    """Дозапустить прогон: вопросы, которых нет (процесс упал) или которые упали из-за сети/тайм-аута."""
+    _dir(run_id)
+    from app.runs import resume_run
+    t = asyncio.create_task(resume_run(run_id))
+    _tasks.add(t)
+    t.add_done_callback(_tasks.discard)
+    return {"run_id": run_id}
+
+
+@router.get("/compare/{before}/{after}", response_model=out.CompareOut)
 def compare(before: str, after: str):
     """«Было/стало»: индекс, разбивка по типам и вопросы, где вердикт поменялся."""
     out = {}
@@ -119,12 +131,12 @@ class LadderIn(BaseModel):
     steps: list[str] | None = None
 
 
-@ladders_router.get("/steps")
+@ladders_router.get("/steps", response_model=list[out.LadderStepDef])
 def ladder_steps():
     return [{"step": s, "title": t, "pipeline": p, "options": o, "guard": g} for s, t, p, o, g in LADDER]
 
 
-@ladders_router.post("", status_code=202)
+@ladders_router.post("", status_code=202, response_model=out.LadderStarted)
 async def start_ladder(body: LadderIn):
     try:
         info = datasets.info(body.dataset)
@@ -139,13 +151,13 @@ async def start_ladder(body: LadderIn):
     return {"ladder_id": lid}
 
 
-@ladders_router.get("")
+@ladders_router.get("", response_model=list[out.LadderOut])
 def ladders():
     """Готово для графика: по каждой лесенке — шаги по порядку с индексом, верно/не знаю/обман и разбивкой по типам."""
     return list_ladders()
 
 
-@ladders_router.get("/{ladder_id}")
+@ladders_router.get("/{ladder_id}", response_model=out.LadderOut)
 def ladder_detail(ladder_id: str):
     """Шаги + вклад критиков (по trace шагов с критиками): сколько обманов поймал каждый и сколько ложных тревог."""
     lad = next((x for x in list_ladders() if x["id"] == ladder_id), None)

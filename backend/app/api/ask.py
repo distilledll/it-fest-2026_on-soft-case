@@ -14,6 +14,17 @@ from app.verify import guard
 
 router = APIRouter(prefix="/api/ask", tags=["ask"])
 
+SSE_DOC = {200: {"description": (
+    "Поток Server-Sent Events. События `step` — шаги агента (схема TraceStep), по мере работы; "
+    "последним приходит одно событие `answer` (схема Answer). Пример:\n\n"
+    "```\nevent: step\ndata: {\"node\": \"prepare\", \"ok\": true, \"message\": \"режим: full\", \"data\": {}}\n\n"
+    "event: step\ndata: {\"node\": \"critic_conflict\", \"ok\": false, \"message\": \"в документах разные значения…\"}\n\n"
+    "event: answer\ndata: {\"id\": \"adhoc\", \"status\": \"расхождение\", \"answer\": \"60 и 75\", "
+    "\"quote\": \"…\", \"file\": \"01_izveshchenie.txt\", \"trace\": [], \"llm_calls\": 3}\n```"),
+    "content": {"text/event-stream": {"schema": {"type": "string"}}}}}
+
+
+
 
 class AskIn(BaseModel):
     dataset: str = "sample"
@@ -43,7 +54,7 @@ async def ask(body: AskIn):
     return await answer_one(pipeline, q, root, ctx, body.guard)
 
 
-@router.post("/stream")
+@router.post("/stream", responses=SSE_DOC, response_class=EventSourceResponse)
 async def ask_stream(body: AskIn):
     """SSE: события `step` (TraceStep) по мере работы агента и финальное `answer` (Answer)."""
     root, ctx, pipeline, q = _prepare(body)

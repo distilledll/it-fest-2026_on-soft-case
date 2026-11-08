@@ -13,4 +13,8 @@ def tmp_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "llm_base_url", "")
     settings.runs_dir.mkdir(parents=True)
     settings.datasets_dir.mkdir(parents=True)
+    from app import llm
+    monkeypatch.setitem(llm._outage, "until", 0.0)
+    monkeypatch.setitem(llm._outage, "delay", 5.0)
+    monkeypatch.setattr(settings, "llm_rps", 0)          # ограничение частоты проверяется отдельным тестом
     yield

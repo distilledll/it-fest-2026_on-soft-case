@@ -2,9 +2,11 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app import datasets
+from app.api import out
 from app.config import settings
 from app.datasets import DatasetError
 from app.ingest import load_package, load_questions
+from app.schemas import Document, Question
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -16,12 +18,12 @@ def _dir(did: str):
         raise HTTPException(404, str(e))
 
 
-@router.get("")
+@router.get("", response_model=list[out.DatasetInfo])
 def list_datasets():
     return datasets.list_all()
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=out.DatasetInfo)
 async def upload(files: list[UploadFile] = File(...), name: str = Form(""), package: str = Form("P01")):
     """Один .zip (формат организатора или любая структура с .txt) или несколько .txt одной закупки."""
     limit = settings.max_upload_mb * 2**20
@@ -41,7 +43,7 @@ async def upload(files: list[UploadFile] = File(...), name: str = Form(""), pack
     return datasets.info(did)
 
 
-@router.get("/{did}")
+@router.get("/{did}", response_model=out.DatasetDetail)
 def get_dataset(did: str):
     root = _dir(did)
     return {**datasets.info(did),
@@ -57,13 +59,13 @@ def delete_dataset(did: str):
         raise HTTPException(400, str(e))
 
 
-@router.get("/{did}/questions")
+@router.get("/{did}/questions", response_model=list[Question])
 def questions(did: str):
     root = _dir(did)
     return load_questions(root) if (root / "questions.csv").exists() else []
 
 
-@router.get("/{did}/packages/{package}/files/{file}")
+@router.get("/{did}/packages/{package}/files/{file}", response_model=Document)
 def document(did: str, package: str, file: str):
     """Полный текст документа — для подсветки цитаты на фронте."""
     for d in load_package(_dir(did), package):

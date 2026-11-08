@@ -83,3 +83,28 @@ def test_ladder_stub(monkeypatch):
         time.sleep(0.1)
     assert [s["step"] for s in lad["steps"]] == ["baseline", "full"]
     assert lad["steps"][0]["index"] is not None and lad["steps"][0]["by_type"]
+
+
+def test_embedding_profile_from_frontend(monkeypatch):
+    """Фронт подключает эмбеддинги отдельным профилем со своим адресом и ключом."""
+    from app import llm
+    r = c.post("/api/models", json={"id": "emb2", "name": "Другие эмбеддинги", "kind": "embedding",
+                                          "base_url": "http://emb.local/v1", "model": "text-embedding-3-small",
+                                          "api_key": "secret", "embed_dimensions": 512})
+    assert r.status_code == 201 and r.json()["kind"] == "embedding" and "api_key" not in r.json()
+    assert llm.load().roles["embed"] == "emb2"
+    chat = c.post("/api/models", json={"id": "c1", "name": "c", "base_url": "http://x", "model": "m"}).json()
+    assert c.put("/api/models/roles", json={"embed": chat["id"]}).status_code == 422
+    assert c.put("/api/models/roles", json={"answer": "emb2"}).status_code == 422
+
+    async def fake_embed(profile, texts, task=None, dimensions=None):
+        return [[0.0] * (profile.embed_dimensions or 3)]
+    monkeypatch.setattr(llm, "embed", fake_embed)
+    t = c.post("/api/models/emb2/test").json()
+    assert t["ok"] and t["dimensions"] == 512
+
+
+def test_old_profiles_get_kind():
+    from app.llm import ModelProfile
+    assert ModelProfile.model_validate({"name": "e", "base_url": "x", "model": "cifra48/embedding"}).kind == "embedding"
+    assert ModelProfile.model_validate({"name": "l", "base_url": "x", "model": "cifra48/llm"}).kind == "chat"

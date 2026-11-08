@@ -16,7 +16,8 @@ class Settings(BaseSettings):
 
     # Встроенный пример организатора (датасет "sample") и оценщик по умолчанию.
     sample_dir: Path = ROOT / "data" / "sample"
-    checker: Path = ROOT / "data" / "sample" / "check.py"
+    # check.py из архива датасета, если он там есть; иначе эталонный оценщик организатора из репозитория
+    checker: Path = BACKEND / "eval" / "check.py"
     # Всё, что меняется в рантайме: загруженные датасеты, прогоны, models.json.
     storage_dir: Path = ROOT / "storage"
 
@@ -27,14 +28,20 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_api_key_env: str = "LLM_API_KEY"   # имя переменной с ключом, сам ключ — в .env
     llm_extra_headers: str = ""            # "User-Agent=Mozilla/5.0 ...;X-Foo=bar"
+    # Эмбеддинги по умолчанию: свой адрес и ключ (пусто — те же, что у LLM)
+    embed_model: str = ""
+    embed_base_url: str = ""
+    embed_api_key_env: str = ""            # имя переменной с ключом эмбеддингов, напр. EMBED_API_KEY
 
     max_concurrency: int = 2        # сколько вопросов прогона обрабатываются одновременно
     llm_concurrency: int = 1        # сколько запросов к API одновременно (лимит шлюза на организацию)
     llm_retries: int = 8            # повторы на 429/5xx/сетевых ошибках
     llm_timeout_s: float = 90.0     # таймаут одного запроса к API
+    llm_rps: float = 2.0            # не чаще стольких запросов в секунду (0 — без ограничения)
+    llm_outage_s: float = 300.0     # сколько ждать, пока API снова станет доступен (обрыв связи, 5xx)
     question_timeout_s: float = 600.0   # на весь вопрос, включая ожидание очереди и повторы
+    retry_pauses_s: list[float] = [10.0, 30.0, 60.0]   # повтор упавших вопросов прогона: паузы между раундами
     max_upload_mb: int = 200
-    embed_dimensions: int = 256     # размерность эмбеддингов для поиска фрагментов (меньше — быстрее и легче кэш)
 
     @property
     def datasets_dir(self) -> Path:

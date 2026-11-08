@@ -89,6 +89,7 @@ class Index:
     chunks: list[Chunk]
     bm25: BM25
     vectors: list[list[float]] | None = None
+    embed_error: str | None = None      # эмбеддинги не получились — поиск только по словам (видно в trace)
 
 
 _indexes: dict[str, Index] = {}
@@ -106,7 +107,7 @@ def _key(docs: list[Document], embed_model: str) -> str:
 async def get_index(docs: list[Document], ctx) -> Index:
     """Индекс закупки: строится один раз (на процесс — в памяти, эмбеддинги — ещё и на диске)."""
     embed = ctx.models.get("embed") if ctx else None
-    key = _key(docs, embed.model if embed else "")
+    key = _key(docs, f"{embed.base_url}|{embed.model}|{embed.embed_dimensions}" if embed else "")
     if key in _indexes:
         return _indexes[key]
     lock = _locks.setdefault(key, asyncio.Lock())
@@ -121,13 +122,13 @@ async def get_index(docs: list[Document], ctx) -> Index:
                 idx.vectors = json.loads(cache.read_text())
             else:
                 try:
-                    vecs = await llm.embed(embed, [c.text for c in chunks], task="retrieval.passage",
-                                           dimensions=settings.embed_dimensions)
+                    vecs = await llm.embed(embed, [c.text for c in chunks], task=embed.embed_passage_task)
                     cache.parent.mkdir(parents=True, exist_ok=True)
                     cache.write_text(json.dumps(vecs))
                     idx.vectors = vecs
-                except Exception:           # эмбеддинги недоступны — работаем на BM25
+                except Exception as e:      # эмбеддинги недоступны — работаем на BM25, но не молча
                     idx.vectors = None
+                    idx.embed_error = f"{type(e).__name__}: {e}"[:200]
         _indexes[key] = idx
         return idx
 
@@ -142,15 +143,15 @@ async def search(queries: list[str], docs: list[Document], ctx, k: int = 12, per
     if not idx.chunks:
         return [], {"mode": "hybrid", "chunks": 0}
     rrf = [0.0] * len(idx.chunks)
+    query_error = None
     for q in queries:
         rankings = [idx.bm25.scores(tokens(q))]
         if idx.vectors:
             try:
-                qv = (await llm.embed(ctx.models["embed"], [q], task="retrieval.query",
-                                      dimensions=settings.embed_dimensions))[0]
+                qv = (await llm.embed(ctx.models["embed"], [q], task=ctx.models["embed"].embed_query_task))[0]
                 rankings.append([_cos(qv, v) for v in idx.vectors])
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 — вопрос ищем по словам, но в trace это видно
+                query_error = f"{type(e).__name__}: {e}"[:200]
         for scores in rankings:
             order = sorted(range(len(scores)), key=lambda i: -scores[i])
             for rank, i in enumerate(order[:200]):
@@ -162,7 +163,10 @@ async def search(queries: list[str], docs: list[Document], ctx, k: int = 12, per
         picked += [i for i in best if i not in picked]
     picked = sorted(set(picked), key=lambda i: (idx.chunks[i].file, idx.chunks[i].start))
     out = [Chunk(idx.chunks[i].file, idx.chunks[i].text, idx.chunks[i].start, rrf[i]) for i in picked]
-    return out, {"mode": "hybrid+emb" if idx.vectors else "hybrid", "chunks": len(out), "queries": len(queries)}
+    info = {"mode": "hybrid+emb" if idx.vectors else "hybrid", "chunks": len(out), "queries": len(queries)}
+    if idx.embed_error or query_error:
+        info["embed_error"] = idx.embed_error or query_error
+    return out, info
 
 
 RERANK = """Оцени, насколько каждый фрагмент документа помогает ответить на вопрос, по шкале 0–10.

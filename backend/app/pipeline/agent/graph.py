@@ -1,8 +1,12 @@
 """Агентный цикл на LangGraph.
 
-    prepare → answer → check ──ok──→ llm_critic ──ok──→ finalize
-                 ↑        │ error/warn        │ problem
-                 └────────┴───── retry (пока есть бюджет) ──→ «не знаю»
+    prepare → decompose ─┬──────────────→ answer → check ──ok──→ llm_critic ──ok──→ finalize
+                         └─ map (закупка   ↑         │ error/warn        │ problem
+                            не влезает)    └─────────┴── retry (пока есть бюджет) ──→ «не знаю»
+
+map — map-reduce: модель читает закупку фрагментами (всю, если фрагментов ≤ map_max_chunks) и выписывает дословные цитаты, код их проверяет
+(есть ли в документах, не старая ли редакция), answer отвечает только по ним. Включается сам, когда
+закупка не влезает в context_chars (strategy "auto"), или всегда (strategy "map").
 
 Опции (ctx.options), чтобы мерить вклад каждой части:
   critics: list[str]      какие критики кодом включены (по умолчанию все из critics.CRITICS)
@@ -16,6 +20,10 @@
   rerank: bool            реранк фрагментов моделью (False — включать по замеру)
   quote_first: bool       сначала модель выписывает фрагменты, код их проверяет и размечает, ответ — только по ним
   votes: int              голосование: сколько ответов сравнить на первой попытке (1 — выключено)
+  map_extract: bool       с quote_first: модель читает закупку фрагментами (map), ответ — по проверенным выпискам (reduce)
+  map_chunk_chars: int    размер фрагмента для map (4000); map_max_chunks — больше стольких фрагментов отбирает поиск (30)
+  strategy: str           "auto" (по умолчанию: map, только если закупка не влезает в context_chars) |
+                          "full" (без map) | "map" (всегда); можно задать в профиле модели
 """
 import asyncio
 import operator
@@ -45,7 +53,8 @@ class State(TypedDict, total=False):
     pending_warns: list[Issue] # повторный warn, на который модель не отреагировала
     fragments: bool            # модель видит фрагменты, а не документы целиком
     researched: bool           # повторный поиск перед «нет в документах» уже был
-    quotes_ready: bool         # шаг «сначала цитаты» выполнен (опция quote_first)
+    quotes_ready: bool         # шаг «сначала цитаты» выполнен (узел map)
+    auto_map: bool             # map включён автоматически: закупка не влезла в контекст
     vote: dict | None          # итог голосования (опция votes)
     critic_ok: bool
     attempts: int
@@ -74,6 +83,8 @@ async def prepare(state: State, config) -> dict:
         notes.append(f"вырезано инструкций для ИИ: {info['redacted']}")
     if info["empty"]:
         notes.append(f"пустые файлы: {', '.join(info['empty'])}")
+    if info.get("embed_error"):
+        notes.append(f"эмбеддинги не работают ({info['embed_error']}) — поиск только по словам")
     if info.get("chunks") is not None:
         notes.append(f"фрагментов: {info['chunks']} из файлов {', '.join(info.get('files', []))}")
     return {"context": context, "messages": msgs, "attempts": 0, "llm_calls": 0, "warned": [],
@@ -110,12 +121,19 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     from app.ingest import is_injection
     from app.verify import quote_exists, snap_quote
 
-    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
-        {"role": "user", "content": prompts.EXTRACT.format(context=state["context"], question=state["question"])}])
-    try:
-        got = [q for q in llm.parse_json(raw).get("quotes", []) if isinstance(q, dict)]
-    except (ValueError, TypeError, AttributeError):
-        got = []
+    calls, coverage, stale = 1, "", 0
+    map_mode = bool(_opt(ctx, "map_extract", False)) or state.get("auto_map", False)
+    if map_mode:
+        got, calls, read_all = await _map_extract(state["question"], docs, ctx)
+        coverage = ("Прочитаны ВСЕ фрагменты документов закупки." if read_all else
+                    "Прочитаны только фрагменты, отобранные поиском: если ответа нет — лучше «не знаю», чем «нет в документах».")
+    else:
+        raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+            {"role": "user", "content": prompts.EXTRACT.format(context=state["context"], question=state["question"])}])
+        try:
+            got = [q for q in llm.parse_json(raw).get("quotes", []) if isinstance(q, dict)]
+        except (ValueError, TypeError, AttributeError):
+            got = []
     amendments = parse_amendments(docs)
     by_file = {d.file: d for d in docs}
     lines, kept, dropped, seen = [], 0, 0, set()
@@ -137,7 +155,18 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
         tags = []
         if file in by_file and is_amendment_doc(by_file[file]):
             tags.append("[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]")
-        if superseded_by(text, file, amendments):
+        old_by = superseded_by(text, file, amendments)
+        if old_by:
+            if map_mode:          # в map-reduce старую редакцию не показываем, а подставляем то, что её заменило
+                stale += 1
+                repl = old_by.repeal_text if old_by.repealed else old_by.new_text
+                if repl and repl.lower() not in seen:
+                    seen.add(repl.lower())
+                    note = (f"пункт отменён, требования больше нет; отменённый текст: «{text}»" if old_by.repealed
+                            else "заменяет старую редакцию")
+                    lines.append(f"- ({old_by.amend_file}) [ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ, {note}] «{repl}»")
+                    kept += 1
+                continue
             tags.append("[СТАРАЯ РЕДАКЦИЯ]")
         lines.append(f"- ({file}) {' '.join(tags)} «{text}»")
         kept += 1
@@ -147,11 +176,84 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
             lines.append(f"- ({file}) [НАЙДЕНО КОДОМ: {field.title} = {v}] «{sent.strip()}»")
     rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
     msgs = [{"role": "user", "content": prompts.ANSWER_FROM_QUOTES.format(
-        quotes="\n".join(lines) or "(фрагменты не найдены)", question=state["question"], multipart_rule=rule)}]
+        quotes=(coverage + "\n" if coverage else "") + ("\n".join(lines) or "(фрагменты не найдены)"),
+        question=state["question"], multipart_rule=rule)}]
+    mode = "по фрагментам" if _opt(ctx, "map_extract", False) else "сначала цитаты"
     step = TraceStep(node="extract", ok=kept > 0,
-                     message=f"сначала цитаты: проверено {kept}, отброшено (нет в документах/инъекция) {dropped}",
+                     message=f"{mode}: запросов {calls}, проверено {kept}, отброшено (нет в документах/инъекция) {dropped}"
+                             + (f", старая редакция скрыта: {stale}" if stale else "") + (f". {coverage}" if coverage else ""),
                      data={"quotes": lines})
-    return msgs, [step], 1
+    return msgs, [step], calls
+
+
+async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[dict], int, bool]:
+    """Map: модель читает закупку небольшими фрагментами и по каждому выписывает дословные предложения.
+    Узкая задача на коротком тексте — по силам и маленькой модели. Фрагменты обрабатываются параллельно.
+    Если фрагментов больше map_max_chunks, сначала отбираем лучшие (BM25), изменения извещения — всегда."""
+    from app import retrieval
+    from app.pipeline.agent.context import redact
+    from app.pipeline.agent.critics import is_amendment_doc
+
+    size, overlap = int(_opt(ctx, "map_chunk_chars", 4000)), 200
+    chunks: list[tuple[Document, str]] = []
+    for d in docs:
+        if d.is_empty:
+            continue
+        pos = 0
+        while pos < len(d.text):
+            end = min(len(d.text), pos + size)
+            if end < len(d.text):
+                cut = max(d.text.rfind("\n", pos + size // 2, end), d.text.rfind(". ", pos + size // 2, end))
+                end = cut + 1 if cut > pos else end
+            chunks.append((d, d.text[pos:end]))
+            if end >= len(d.text):
+                break
+            pos = max(end - overlap, pos + 1)
+    # читаем всё: только тогда «нет в документах» обоснован; поиск отбирает фрагменты лишь для огромных документов
+    limit = int(_opt(ctx, "map_max_chunks", 30))
+    read_all = len(chunks) <= limit
+    if not read_all:
+        must = [c for c in chunks if is_amendment_doc(c[0])]
+        rest = [c for c in chunks if not is_amendment_doc(c[0])]
+        scores = retrieval.BM25([retrieval.tokens(t) for _, t in rest]).scores(retrieval.tokens(question))
+        order = sorted(range(len(rest)), key=lambda i: -scores[i])
+        picked = must + [rest[i] for i in order[:max(limit - len(must), 1)]]
+        for f in {d.file for d, _ in rest}:                          # хотя бы лучший кусок каждого файла
+            best = next((rest[i] for i in order if rest[i][0].file == f), None)
+            if best and best not in picked:
+                picked.append(best)
+        chunks = picked
+    prof = ctx.model("answer")
+
+    async def read(doc: Document, text: str) -> list[dict]:
+        shown, _ = redact(text)
+        raw = await llm.chat(prof, json=True, messages=[{"role": "user", "content": prompts.MAP_CHUNK.format(
+            file=doc.file, question=question, chunk=shown)}])
+        try:
+            qs = llm.parse_json(raw).get("quotes", [])
+        except (ValueError, TypeError, AttributeError):
+            return []
+        return [{"file": doc.file, "quote": str(q.get("quote") if isinstance(q, dict) else q)} for q in qs if q]
+
+    found = await asyncio.gather(*(read(d, t) for d, t in chunks), return_exceptions=True)
+    got = [q for r in found if isinstance(r, list) for q in r]
+    return got, len(chunks), read_all
+
+
+MONTH_DATE = re.compile(r"(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[яй]|июн\w*|июл\w*|август\w*|"
+                        r"сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)\s+(\d{4})", re.I)
+TIME_WORDS = re.compile(r"(\d{1,2})\s*час\w*\s*(\d{1,2})?\s*(?:минут\w*)?", re.I)
+
+
+def normalize_answer(answer: str) -> str:
+    """Дата прописью → «ДД.ММ.ГГГГ ЧЧ:ММ» (формат, который ждёт check.py). Слабые модели переписывают дату словами."""
+    from app.verify import MONTHS
+    m = MONTH_DATE.search(answer or "")
+    if not m or re.search(r"\d{1,2}\.\d{1,2}\.\d{4}", answer):
+        return answer
+    date = f"{int(m.group(1)):02d}.{MONTHS[m.group(2).lower()[:3]]:02d}.{m.group(3)}"
+    t = TIME_WORDS.search(answer) or re.search(r"(\d{1,2}):(\d{2})", answer)
+    return f"{date} {int(t.group(1)):02d}:{int(t.group(2) or 0):02d}" if t else date
 
 
 def _vote_key(status: str, answer: str) -> str:
@@ -201,14 +303,34 @@ def _vote_issue(vote: dict) -> Issue:
                  data={"variants": vote["variants"]})
 
 
+def use_map(state: State, config) -> str:
+    """Дробить ли закупку: явно (quote_first / strategy "map") или сама, если она не влезла в контекст."""
+    _, ctx = _cfg(config)
+    if _opt(ctx, "quote_first", False):
+        return "map"
+    if _opt(ctx, "strategy", "auto") == "auto" and state.get("fragments"):
+        return "map"
+    return "answer"
+
+
+async def map_node(state: State, config) -> dict:
+    docs, ctx = _cfg(config)
+    auto = not _opt(ctx, "quote_first", False)
+    st = {**state, "auto_map": auto}
+    msgs, steps, calls = await _quote_first(st, docs, ctx)
+    if auto:
+        steps = [TraceStep(node="map", ok=None, message="закупка не влезает в контекст модели — читаем её "
+                                                         "целиком по фрагментам (map-reduce)")] + steps
+    # map уже прочитал закупку целиком (или лучшие фрагменты всех файлов) — повторный поиск не нужен
+    return {"messages": msgs, "quotes_ready": True, "auto_map": auto, "researched": True,
+            "llm_calls": state["llm_calls"] + calls, "trace": steps}
+
+
 async def answer(state: State, config) -> dict:
     docs, ctx = _cfg(config)
     prof = ctx.model("answer")
     pre: list[TraceStep] = []
     extra_calls = 0
-    if _opt(ctx, "quote_first", False) and not state.get("quotes_ready"):
-        msgs, pre, extra_calls = await _quote_first(state, docs, ctx)
-        state = {**state, "messages": msgs, "quotes_ready": True}
     raw = await llm.chat(prof, state["messages"], json=True)
     msgs = state["messages"] + [{"role": "assistant", "content": raw}]
     upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1 + extra_calls,
@@ -231,6 +353,7 @@ async def answer(state: State, config) -> dict:
         upd["llm_calls"] += vote_calls
         upd["vote"] = vote
         pre = pre + [vote_step]
+    d.answer = normalize_answer(d.answer)
     return {**upd, "draft": d, "issues": [],
             "trace": pre + [TraceStep(node="answer", ok=True, message=f"попытка {upd['attempts']}: {d.status} «{d.answer}»",
                                 data={"draft": d.__dict__, "model": prof.model})]}
@@ -356,12 +479,14 @@ def after_critic(state: State, config) -> str:
 
 def build():
     g = StateGraph(State)
-    for name, fn in (("prepare", prepare), ("decompose", decompose), ("research", research), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
-                     ("retry", retry), ("finalize", finalize)):
+    for name, fn in (("prepare", prepare), ("decompose", decompose), ("map", map_node), ("research", research),
+                     ("answer", answer), ("check", check), ("llm_critic", llm_critic), ("retry", retry),
+                     ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "prepare")
     g.add_edge("prepare", "decompose")
-    g.add_edge("decompose", "answer")
+    g.add_conditional_edges("decompose", use_map, ["map", "answer"])
+    g.add_edge("map", "answer")
     g.add_edge("answer", "check")
     g.add_conditional_edges("check", after_check, ["retry", "research", "llm_critic", "finalize"])
     g.add_edge("research", "answer")
@@ -384,8 +509,18 @@ def _evidence(raw) -> list[dict]:
 
 
 def _evidence_text(d: Draft, docs: list[Document]) -> str:
+    from app.pipeline.agent.critics import parse_amendments
     from app.verify import quote_exists
     rows = [f"- {e['file']}: «{e['quote']}» → {e['value']}" for e in d.evidence if quote_exists(e["quote"], docs)]
+    # цитата — строка изменения извещения: критик должен видеть, что именно было отменено или заменено,
+    # иначе «пункт 2.6 утратил силу» для него не связан с параметром из вопроса
+    cited = norm(" ".join([d.quote] + [e["quote"] for e in d.evidence]))
+    for a in parse_amendments(docs):
+        mark = norm(a.repeal_text if a.repealed else a.new_text)
+        if mark and a.old_sentence and (mark in cited or (cited and cited in mark)):
+            what = "признан утратившим силу" if a.repealed else "изложен в новой редакции"
+            rows.append(f"- пункт {a.clause or '?'} ({a.target_file}) {what} изменением ({a.amend_file}); "
+                        f"старая редакция: «{a.old_sentence}»")
     return "\n".join(rows) or "(не приведены)"
 
 

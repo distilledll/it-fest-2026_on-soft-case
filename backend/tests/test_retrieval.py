@@ -43,7 +43,7 @@ def test_embeddings_are_cached(monkeypatch, tmp_path):
 
     monkeypatch.setattr(llm, "embed", fake_embed)
     retrieval._indexes.clear()
-    ctx = Context(models={**CTX.models, "embed": ModelProfile(id="e", name="e", base_url="http://x", model="emb")})
+    ctx = Context(models={**CTX.models, "embed": ModelProfile(id="e", name="e", base_url="http://x", model="emb", embed_query_task="retrieval.query")})
     chunks, info = asyncio.run(retrieval.search(["гарантия"], BIG, ctx, k=2))
     assert info["mode"] == "hybrid+emb" and any("30 месяцев" in c.text for c in chunks)
     retrieval._indexes.clear()                      # новый процесс: индекс берётся с диска, не пересчитывается
@@ -74,7 +74,7 @@ def test_research_before_absent_in_fragment_mode(monkeypatch):
 
     monkeypatch.setattr(llm, "chat", fake_chat)
     retrieval._indexes.clear()
-    ctx = Context(models=CTX.models, options={"llm_critic": False})
+    ctx = Context(models=CTX.models, options={"llm_critic": False, "strategy": "full"})
     a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Срок гарантии?"), BIG, ctx))
     assert a.status == Status.ANSWER and a.answer == "30"
     assert "research" in [t.node for t in a.trace] and a.llm_calls == 3
@@ -89,3 +89,15 @@ def test_no_research_when_documents_fit(monkeypatch):
     a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Срок гарантии?"), small,
                                            Context(models=CTX.models, options={"llm_critic": False})))
     assert a.status == Status.ABSENT and "research" not in [t.node for t in a.trace]
+
+
+def test_embedding_failure_is_visible(monkeypatch):
+    """Чужой API эмбеддингов отклонил запрос — поиск работает по словам, а в trace видно почему."""
+    async def broken(profile, texts, task=None, dimensions=None):
+        raise ValueError("unknown field: task")
+
+    monkeypatch.setattr(llm, "embed", broken)
+    retrieval._indexes.clear()
+    ctx = Context(models={**CTX.models, "embed": ModelProfile(id="e2", name="e", base_url="http://y", model="emb")})
+    chunks, info = asyncio.run(retrieval.search(["гарантия"], BIG, ctx, k=2))
+    assert info["mode"] == "hybrid" and "unknown field" in info["embed_error"]
