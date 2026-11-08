@@ -52,6 +52,8 @@ def main():
     r.add_argument("--concurrency", type=int, help="параллельных запросов к API (по лимиту ключа); "
                                                    "влияет только на скорость")
     sub.add_parser("runs")
+    rp = sub.add_parser("report", help="отчёт для сдачи (markdown) из накопленных прогонов и лесенок")
+    rp.add_argument("--out", type=Path, default=Path("docs/report.md"))
     rs = sub.add_parser("resume", help="дозапустить прогон: недостающие и упавшие (сеть, тайм-аут) вопросы")
     rs.add_argument("run_id")
     rs.add_argument("--out", type=Path)
@@ -100,6 +102,10 @@ def main():
         for st in lad["steps"]:
             print(f"  {st['title']:34} индекс {st['index']!s:>6}  верно {st['correct']}  не знаю {st['careful']}  "
                   f"обман {st['lies']}  запросов {st['llm_calls']}  {st['elapsed_s']} с")
+    elif a.cmd == "report":
+        from app.report import build
+        a.out.write_text(build(), encoding="utf-8")
+        print(f"отчёт → {a.out}")
     elif a.cmd == "resume":
         from app.runs import resume_run
         if a.concurrency:
