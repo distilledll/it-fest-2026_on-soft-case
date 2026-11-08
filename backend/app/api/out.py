@@ -66,6 +66,10 @@ class ModelProfileOut(Out):
     reasoning_effort: str | None = None
     extra_body: dict = {}
     agent_options: dict = Field(default_factory=dict, description="опции агента по умолчанию, напр. {\"strategy\": \"map\"}")
+    kind: str = Field("chat", description="chat — роли answer/critic; embedding — роль embed")
+    embed_query_task: str | None = Field(None, description="только embedding: поле task для вопроса (нестандартное)")
+    embed_passage_task: str | None = Field(None, description="только embedding: поле task для фрагментов документов")
+    embed_dimensions: int | None = Field(None, description="только embedding: размерность векторов (если API умеет)")
     has_key: bool = Field(description="ключ задан (сам ключ API никогда не отдаёт)")
 
 
@@ -78,6 +82,7 @@ class ModelsOut(Out):
 class ModelTestOut(Out):
     ok: bool
     reply: str | None = None
+    dimensions: int | None = Field(None, description="для embedding: размерность полученного вектора")
     latency_s: float | None = None
     error: str | None = None
 

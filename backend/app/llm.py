@@ -12,10 +12,10 @@ import os
 import re
 import threading
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import settings
 
@@ -41,6 +41,21 @@ class ModelProfile(BaseModel):
     # опции агента по умолчанию для этой модели, напр. {"strategy": "map"} для слабых моделей;
     # опции запроса/прогона их переопределяют
     agent_options: dict[str, Any] = Field(default_factory=dict)
+    # chat — отвечает/проверяет (роли answer, critic); embedding — векторы для поиска (роль embed)
+    kind: Literal["chat", "embedding"] = "chat"
+    # для embedding: нестандартные поля запроса /embeddings. Не всякий API их принимает, поэтому
+    # по умолчанию не отправляются (напр. для шлюза: "retrieval.query" / "retrieval.passage", 256)
+    embed_query_task: str | None = None
+    embed_passage_task: str | None = None
+    embed_dimensions: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _guess_kind(cls, v):
+        # профили, сохранённые до появления kind: модель с «embed» в имени — эмбеддинги
+        if isinstance(v, dict) and "kind" not in v and "embed" in str(v.get("model", "")).lower():
+            v = {**v, "kind": "embedding"}
+        return v
 
     def public(self) -> dict:
         d = self.model_dump(exclude={"api_key"})
@@ -92,6 +107,13 @@ def load() -> Registry:
                             extra_headers=settings.llm_extra_headers)
         reg.profiles.append(prof)
         reg.roles = {"answer": "default", "critic": "default"}
+    if settings.embed_model:
+        reg.profiles.append(ModelProfile(
+            id="embedding", name="Эмбеддинги (.env)", kind="embedding", model=settings.embed_model,
+            base_url=settings.embed_base_url or settings.llm_base_url,
+            api_key_env=settings.embed_api_key_env or settings.llm_api_key_env,
+            extra_headers=settings.llm_extra_headers))
+        reg.roles["embed"] = "embedding"
     return reg
 
 
@@ -231,6 +253,7 @@ async def embed(profile: ModelProfile, texts: list[str], task: str | None = None
     extra = dict(profile.extra_body)
     if task:
         extra["task"] = task
+    dimensions = dimensions or profile.embed_dimensions
     if dimensions:
         extra["dimensions"] = dimensions
     out: list[list[float]] = []

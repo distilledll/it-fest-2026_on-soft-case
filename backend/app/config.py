@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_api_key_env: str = "LLM_API_KEY"   # имя переменной с ключом, сам ключ — в .env
     llm_extra_headers: str = ""            # "User-Agent=Mozilla/5.0 ...;X-Foo=bar"
+    # Эмбеддинги по умолчанию: свой адрес и ключ (пусто — те же, что у LLM)
+    embed_model: str = ""
+    embed_base_url: str = ""
+    embed_api_key_env: str = ""            # имя переменной с ключом эмбеддингов, напр. EMBED_API_KEY
 
     max_concurrency: int = 2        # сколько вопросов прогона обрабатываются одновременно
     llm_concurrency: int = 1        # сколько запросов к API одновременно (лимит шлюза на организацию)
@@ -36,7 +40,6 @@ class Settings(BaseSettings):
     question_timeout_s: float = 600.0   # на весь вопрос, включая ожидание очереди и повторы
     retry_pauses_s: list[float] = [10.0, 30.0, 60.0]   # повтор упавших вопросов прогона: паузы между раундами
     max_upload_mb: int = 200
-    embed_dimensions: int = 256     # размерность эмбеддингов для поиска фрагментов (меньше — быстрее и легче кэш)
 
     @property
     def datasets_dir(self) -> Path:

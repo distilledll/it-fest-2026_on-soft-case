@@ -83,6 +83,8 @@ async def prepare(state: State, config) -> dict:
         notes.append(f"вырезано инструкций для ИИ: {info['redacted']}")
     if info["empty"]:
         notes.append(f"пустые файлы: {', '.join(info['empty'])}")
+    if info.get("embed_error"):
+        notes.append(f"эмбеддинги не работают ({info['embed_error']}) — поиск только по словам")
     if info.get("chunks") is not None:
         notes.append(f"фрагментов: {info['chunks']} из файлов {', '.join(info.get('files', []))}")
     return {"context": context, "messages": msgs, "attempts": 0, "llm_calls": 0, "warned": [],

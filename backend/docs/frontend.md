@@ -91,11 +91,42 @@ GET /api/runs/compare/{before}/{after}   → метрики обоих + changed
 ```
 
 ### 7. Модели
+Каждое подключение — **профиль** (адрес OpenAI-совместимого API, модель, ключ). Профиль назначается на **роль**:
+`answer` — отвечает, `critic` — проверяет ответ, `embed` — эмбеддинги для поиска фрагментов. У LLM и эмбеддингов
+могут быть разные адреса и ключи.
+
 ```
-GET  /api/models                  — профили (без ключей; has_key) и роли
-POST /api/models/{id}/test        — проверить подключение
-GET  /api/models/{id}/remote      — какие модели отдаёт API
-PUT  /api/models/roles {"answer": "<id>", "critic": "<id>"}
+GET    /api/models                — профили (ключи не отдаются, только has_key) и роли
+POST   /api/models                — добавить профиль
+PATCH  /api/models/{id}           — изменить поля (api_key: "" — стереть ключ)
+DELETE /api/models/{id}
+POST   /api/models/{id}/test      — проверить подключение (для embedding вернёт dimensions)
+GET    /api/models/{id}/remote    — какие модели отдаёт API (выбор из списка)
+PUT    /api/models/roles          {"answer": "<id>", "critic": "<id>", "embed": "<id>"}
 ```
+
+LLM:
+```json
+POST /api/models
+{"id": "llm-fast", "name": "Шлюз, без рассуждений", "kind": "chat",
+ "base_url": "https://.../api/v1", "model": "cifra48/llm", "api_key": "<ключ>",
+ "extra_headers": "User-Agent=Mozilla/5.0", "disable_thinking": true}
+```
+Эмбеддинги:
+```json
+POST /api/models
+{"id": "embedding", "name": "Эмбеддинги", "kind": "embedding",
+ "base_url": "https://.../api/v1", "model": "cifra48/embedding", "api_key": "<свой ключ>",
+ "extra_headers": "User-Agent=Mozilla/5.0",
+ "embed_query_task": "retrieval.query", "embed_passage_task": "retrieval.passage", "embed_dimensions": 256}
+```
+- `kind`: `chat` (роли answer/critic) или `embedding` (роль embed). Назначить модель не на свою роль нельзя: 422.
+- Первый добавленный профиль сам становится ролью `answer` (или `embed` для embedding).
+- `embed_query_task` / `embed_passage_task` / `embed_dimensions` — нестандартные поля запроса `/embeddings`.
+  Задавайте, только если API их понимает (шлюз — да; OpenAI понимает только `dimensions`). Не заданы — не отправляются.
+- Если эмбеддинги не работают, поиск идёт только по словам, а в шаге `prepare` будет
+  «эмбеддинги не работают (…) — поиск только по словам».
+- Ключ хранится на сервере в `storage/models.json` (не в git) и наружу не отдаётся.
+
 Модель можно передать в конкретном запросе, не меняя роли: `"roles": {"answer": "qwen7b"}` в `/api/ask`,
 `/api/runs` или `/api/ladders`.
