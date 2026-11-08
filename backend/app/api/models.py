@@ -5,18 +5,19 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import llm
+from app.api import out
 from app.llm import ROLES, ModelProfile
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
 
-@router.get("")
+@router.get("", response_model=out.ModelsOut)
 def list_models():
     reg = llm.load()
     return {"profiles": [p.public() for p in reg.profiles], "roles": reg.roles, "role_names": ROLES}
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=out.ModelProfileOut)
 def create_profile(p: ModelProfile):
     reg = llm.load()
     if any(x.id == p.id for x in reg.profiles):
@@ -40,7 +41,7 @@ class ProfilePatch(BaseModel):
     extra_body: dict | None = None
 
 
-@router.patch("/{pid}")
+@router.patch("/{pid}", response_model=out.ModelProfileOut)
 def update_profile(pid: str, patch: ProfilePatch):
     reg = llm.load()
     for i, p in enumerate(reg.profiles):
@@ -59,7 +60,7 @@ def delete_profile(pid: str):
     llm.save(reg)
 
 
-@router.put("/roles")
+@router.put("/roles", response_model=dict[str, str])
 def set_roles(roles: dict[str, str]):
     reg = llm.load()
     ids = {p.id for p in reg.profiles}
@@ -71,7 +72,7 @@ def set_roles(roles: dict[str, str]):
     return reg.roles
 
 
-@router.post("/{pid}/test")
+@router.post("/{pid}/test", response_model=out.ModelTestOut)
 async def test_profile(pid: str):
     """Проверка подключения: короткий запрос к модели."""
     try:
@@ -86,7 +87,7 @@ async def test_profile(pid: str):
         return {"ok": False, "error": f"{type(e).__name__}: {e}"[:500]}
 
 
-@router.get("/{pid}/remote")
+@router.get("/{pid}/remote", response_model=list[str])
 async def remote_models(pid: str):
     """Список моделей, которые отдаёт сам API (GET /models) — чтобы выбирать из списка, а не вписывать."""
     try:

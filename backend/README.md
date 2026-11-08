@@ -135,6 +135,8 @@ class AgentPipeline:
 
 ## API
 
+Swagger: `/docs`, схема: `/openapi.json`. Сценарии для фронта — [docs/frontend.md](docs/frontend.md).
+
 Полная схема есть в `/docs`.
 
 | Метод | Путь | Что |
