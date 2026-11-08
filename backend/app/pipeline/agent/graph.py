@@ -11,6 +11,9 @@
   context_chars: int      сколько символов документов влезает целиком (по умолчанию 60000)
   multipart: bool         правило про вопросы из нескольких частей + числа подтверждаются любым evidence (True)
   decompose: bool         отдельный запрос разбивает вопрос на подвопросы (False — включать по замеру)
+  research: bool          в режиме фрагментов перед «нет в документах» — повторный поиск с другими запросами (True)
+  retriever: str          "hybrid" (BM25 + эмбеддинги, по умолчанию) | "keyword" (для сравнения)
+  rerank: bool            реранк фрагментов моделью (False — включать по замеру)
 """
 import operator
 from typing import Annotated, Any, TypedDict
@@ -35,6 +38,8 @@ class State(TypedDict, total=False):
     issues: list[Issue]
     warned: list[str]          # по каким warn уже был повтор — второй раз не дёргаем
     pending_warns: list[Issue] # повторный warn, на который модель не отреагировала
+    fragments: bool            # модель видит фрагменты, а не документы целиком
+    researched: bool           # повторный поиск перед «нет в документах» уже был
     critic_ok: bool
     attempts: int
     llm_calls: int
@@ -53,7 +58,7 @@ def _opt(ctx, key, default):
 
 async def prepare(state: State, config) -> dict:
     docs, ctx = _cfg(config)
-    context, info = build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000))
+    context, info = await build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000))
     rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
     msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
             {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
@@ -62,7 +67,10 @@ async def prepare(state: State, config) -> dict:
         notes.append(f"вырезано инструкций для ИИ: {info['redacted']}")
     if info["empty"]:
         notes.append(f"пустые файлы: {', '.join(info['empty'])}")
+    if info.get("chunks") is not None:
+        notes.append(f"фрагментов: {info['chunks']} из файлов {', '.join(info.get('files', []))}")
     return {"context": context, "messages": msgs, "attempts": 0, "llm_calls": 0, "warned": [],
+            "fragments": info["mode"] != "full", "researched": False,
             "trace": [TraceStep(node="prepare", ok=True, message="; ".join(notes), data=info)]}
 
 
@@ -160,6 +168,27 @@ async def llm_critic(state: State, config) -> dict:
             "trace": [TraceStep(node="llm_critic", ok=False, message=problem)]}
 
 
+async def research(state: State, config) -> dict:
+    """Модель видела только фрагменты и сказала «нет в документах» — возможно, промахнулся поиск.
+    Просим другие формулировки, ищем шире и задаём вопрос заново."""
+    docs, ctx = _cfg(config)
+    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+        {"role": "user", "content": prompts.RESEARCH.format(question=state["question"])}])
+    try:
+        alts = [str(x) for x in llm.parse_json(raw).get("queries", []) if str(x).strip()][:3]
+    except (ValueError, TypeError, AttributeError):
+        alts = []
+    context, info = await build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000),
+                                        queries=[state["question"], *alts], k=20)
+    rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
+    msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
+            {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
+    return {"messages": msgs, "researched": True, "llm_calls": state["llm_calls"] + 1, "attempts": 0,
+            "warned": [], "trace": [TraceStep(node="research", ok=True,
+                                              message=f"повторный поиск: {len(alts)} доп. запросов, фрагментов {info.get('chunks')}",
+                                              data={"queries": alts, "files": info.get("files", [])})]}
+
+
 async def retry(state: State, config) -> dict:
     text = "\n".join(f"- [{i.critic}] {i.message}" for i in state["issues"])
     return {"messages": state["messages"] + [{"role": "user", "content": prompts.RETRY.format(issues=text)}],
@@ -184,6 +213,10 @@ def after_check(state: State, config) -> str:
     _, ctx = _cfg(config)
     if state.get("issues"):
         return "retry" if state["attempts"] < _opt(ctx, "max_attempts", 3) else "finalize"
+    d = state.get("draft")
+    if (d and d.status == "нет в документах" and state.get("fragments") and not state.get("researched")
+            and _opt(ctx, "research", True)):
+        return "research"
     if _opt(ctx, "llm_critic", True) and not state.get("critic_ok"):
         return "llm_critic"
     return "finalize"
@@ -198,14 +231,15 @@ def after_critic(state: State, config) -> str:
 
 def build():
     g = StateGraph(State)
-    for name, fn in (("prepare", prepare), ("decompose", decompose), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
+    for name, fn in (("prepare", prepare), ("decompose", decompose), ("research", research), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
                      ("retry", retry), ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "prepare")
     g.add_edge("prepare", "decompose")
     g.add_edge("decompose", "answer")
     g.add_edge("answer", "check")
-    g.add_conditional_edges("check", after_check, ["retry", "llm_critic", "finalize"])
+    g.add_conditional_edges("check", after_check, ["retry", "research", "llm_critic", "finalize"])
+    g.add_edge("research", "answer")
     g.add_conditional_edges("llm_critic", after_critic, ["retry", "finalize"])
     g.add_edge("retry", "answer")
     g.add_edge("finalize", END)
