@@ -198,8 +198,11 @@ async def retry(state: State, config) -> dict:
 async def finalize(state: State, config) -> dict:
     d = state.get("draft")
     # warn по расхождению, оставшийся после исчерпания попыток, — тоже не сдаём: пропущенное расхождение = обман
+    # Неразрешённое расхождение по собственным evidence модели — не сдаём. Подозрение от сверки кодом
+    # (crosscheck) — тоже, но только если критик-модель не подтвердил, что это другой параметр.
+    strict = ("conflict",) if state.get("critic_ok") else ("conflict", "crosscheck")
     errors = [i for i in state.get("issues", []) + state.get("pending_warns", [])
-              if i.severity == "error" or i.critic in ("conflict", "crosscheck")]
+              if i.severity == "error" or i.critic in strict]
     if d is None or errors:
         why = "; ".join(i.message for i in errors)[:300] or "нет корректного ответа"
         return {"final": Draft(status="не знаю"),

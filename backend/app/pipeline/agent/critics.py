@@ -6,6 +6,8 @@
 Набор критиков включается через ctx.options["critics"] — так меряем вклад каждого.
 """
 import ast
+import math
+from collections import Counter
 from contextvars import ContextVar
 import operator
 import re
@@ -148,6 +150,12 @@ def superseded_by(quote: str, file: str, amendments: list[Amendment]) -> Amendme
 
 
 CLAUSE_PREFIX = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s*")
+CLAUSE_REF = re.compile(r"(?:[Пп]ункт\w*|п\.|раздел\w*|приложени\w*)\s*№?\s*\d+(?:\.\d+)*", re.I)
+
+
+def _strip_refs(text: str) -> str:
+    """Убираем номера пунктов: «2.6. Требование…», «Пункт 2.6 извещения…» — это не значения параметра."""
+    return CLAUSE_REF.sub(" ", CLAUSE_PREFIX.sub("", text or ""))
 CLAUSE_NO = re.compile(r"^\d+(?:\.\d+)*\.?$")
 
 
@@ -249,7 +257,7 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
         if not quote_exists(q, docs) or superseded_by(q, f, amendments) or is_injection(nearby(q, docs, f, width=80)):
             continue
         # значение — из поля value; из цитаты только без номера пункта («2.6. Требование…» — не значение 2.6)
-        nums = numbers(e.get("value", "")) or numbers(CLAUSE_PREFIX.sub("", q))
+        nums = numbers(_strip_refs(e.get("value", ""))) or numbers(_strip_refs(q))
         if nums:
             live.append((f, nums[0], q, str(e.get("part") or "1")))
     distinct = {v for _, v, _, _ in live}
@@ -328,7 +336,7 @@ def critic_calc(d: Draft, docs: list[Document], question: str, amendments: list[
 
 # Только сроки: на деньгах и процентах слишком много соседних параметров (обеспечение заявки vs контракта).
 UNIT_RE = re.compile(r"\d[\d  ]*\)?\s*(?:\([^)]{1,40}\)\s*)?(календарн\w*\s+дн\w*|рабоч\w*\s+дн\w*|месяц\w*)", re.IGNORECASE)
-STOP_STEMS = {"какой", "какая", "каков", "сколь", "должн", "нужно", "ответ", "рубля", "проце", "кален", "днях",
+STOP_STEMS = {"какой", "какая", "каков", "сколь", "должн", "нужно", "ответ", "рубля", "проце", "кален", "днях", "дней",
               "месяц", "минима", "макси", "котор", "если", "цене", "участ"}
 
 
@@ -336,9 +344,20 @@ def _stems(text: str) -> set[str]:
     return {w.lower()[:5] for w in re.findall(r"[а-яё]{4,}", text, re.IGNORECASE)} - STOP_STEMS
 
 
+def _quote_sentence(d: Draft, docs: list[Document]) -> str:
+    q = norm(d.quote)
+    for doc in sorted(docs, key=lambda x: x.file != d.file):
+        for sent in _sentences(doc.text):
+            if q and q in norm(sent):
+                return sent
+    return d.quote
+
+
 def critic_crosscheck(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
     """Сверка кодом, без опоры на evidence от модели: ищем в документах другие предложения про тот же
-    параметр (та же единица измерения + слова вопроса) с другим числом. Ловит пропущенное расхождение."""
+    параметр (та же единица измерения + те же редкие слова вопроса) с другим числом. Ловит пропущенное
+    расхождение. Похожесть — с весами по редкости слов (IDF): «результаты работ», «документ о приёмке»
+    весят больше, чем «заказчик» и «рабочих дней», поэтому соседние пункты-отвлекалки не цепляются."""
     if d.status != "ответ" or is_calc(question) or is_yesno(question):
         return []
     a_nums = numbers(d.answer)
@@ -349,26 +368,64 @@ def critic_crosscheck(d: Draft, docs: list[Document], question: str, amendments:
         return []
     unit = m.group(1).lower()[:5]   # «кален» / «рабоч» / «месяц» — календарные и рабочие дни не смешиваем
     q_stems = _stems(question)
-    if len(q_stems) < 1:
+    if not q_stems:
+        return []
+    sents = [(doc.file, sent) for doc in docs for sent in _sentences(doc.text)]
+    df = Counter(st for _, sent in sents for st in _stems(sent) & q_stems)
+    idf = {st: math.log((len(sents) + 1) / (df.get(st, 0) + 1)) + 0.1 for st in q_stems}
+
+    def weight(text: str) -> float:
+        return sum(idf[st] for st in _stems(text) & q_stems)
+
+    base = weight(_quote_sentence(d, docs))
+    if base <= 0:
         return []
     found = []
-    for doc in docs:
-        for sent in _sentences(doc.text):
-            if (superseded_by(sent, doc.file, amendments) or is_injection(sent)
-                    or any(norm(sent) in norm(a.old_prefix) for a in amendments)):
-                continue
-            um = [x for x in UNIT_RE.finditer(sent) if x.group(1).lower()[:5] == unit]
-            if not um or len(q_stems & _stems(sent)) < min(2, len(q_stems)):
-                continue
-            vals = [v for x in um for v in numbers(_words_to_digits(x.group(0))) + numbers(x.group(0))]
-            other = [v for v in vals if not any(abs(v - a) < 0.01 for a in a_nums)]
-            if other and not any(abs(v - a) < 0.01 for v in vals for a in a_nums):
-                found.append((doc.file, other[0], sent.strip()[:160]))
+    for file, sent in sents:
+        if (superseded_by(sent, file, amendments) or is_injection(sent)
+                or any(norm(sent) in norm(a.old_prefix) for a in amendments)):
+            continue
+        um = [x for x in UNIT_RE.finditer(sent) if x.group(1).lower()[:5] == unit]
+        if not um or weight(sent) < 0.8 * base:
+            continue
+        vals = [v for x in um for v in numbers(_words_to_digits(x.group(0))) + numbers(x.group(0))]
+        other = [v for v in vals if not any(abs(v - a) < 0.01 for a in a_nums)]
+        if other and not any(abs(v - a) < 0.01 for v in vals for a in a_nums):
+            found.append((file, other[0], sent.strip()[:160]))
     if found:
         desc = "; ".join(f"{v:g} в {f}: «{s}»" for f, v, s in found[:3])
         return [Issue("crosscheck", f"в документах есть другие значения этого параметра: {desc}. Если это тот же "
                                     f"параметр — статус «расхождение», оба значения в answer и цитаты в evidence",
                       severity="warn", data={"found": found[:3]})]
+    return []
+
+
+QUANT_Q = re.compile(r"\b(сколько|скольких|какой\s+(размер|срок|объ[её]м|процент|минимальн)|какая\s+(цена|сумма|"
+                     r"начальн|минимальн)|какое\s+количество)|в\s+(рублях|процентах|месяцах|днях|календарных|рабочих)", re.I)
+DATE_Q = re.compile(r"до\s+какой\s+даты|какая\s+дата|какого\s+числа", re.I)
+NEG_ANSWER = re.compile(r"\bнет\b|\bне\s+(требует|установлен|предусмотрен|предъявля|устанавлива|нужн)|отсутству|утратил",
+                        re.I)
+
+
+def critic_shape(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
+    """Форма ответа совпадает с вопросом: «сколько / какой размер» → число, «до какой даты» → дата,
+    «да или нет» → да/нет. Иначе модель отвечает словами из документа («в количестве, достаточном…»)
+    там, где ответа нет — это обман."""
+    if d.status != "ответ":
+        return []
+    ans = d.answer or ""
+    if NEG_ANSWER.search(ans):
+        return []
+    if is_yesno(question):
+        if not re.search(r"\b(да|нет)\b", norm(ans)):
+            return [Issue("shape", "вопрос «да или нет», а в ответе нет ни «да», ни «нет»")]
+        return []
+    if DATE_Q.search(question) and not re.search(r"\d{1,2}\.\d{1,2}\.\d{4}", ans):
+        return [Issue("shape", "вопрос о дате, а в ответе нет даты в виде ДД.ММ.ГГГГ. Если даты в документах нет — "
+                               "status «нет в документах»")]
+    if QUANT_Q.search(question) and not number_pool(ans):
+        return [Issue("shape", "вопрос о количестве, сумме или сроке, а в ответе нет числа. Если конкретного числа в "
+                               "документах нет — status «нет в документах»; если требования нет — «не требуется»")]
     return []
 
 
@@ -380,6 +437,7 @@ CRITICS = {
     "crosscheck": critic_crosscheck,
     "negation": critic_negation,
     "calc": critic_calc,
+    "shape": critic_shape,
 }
 
 

@@ -460,3 +460,36 @@ def test_real_conflict_within_one_part_still_caught():
     d = dict(MP_DRAFT, evidence=MP_DRAFT["evidence"] + [
         {"file": "03_opisanie_obekta.txt", "quote": "Срок поставки — 30 календарных дней", "value": "30", "part": 1}])
     assert "conflict" in [i.critic for i in run_critics(Draft(**d), docs, MP_Q)]
+
+
+def test_shape_critic():
+    shape = lambda q, a: [i.critic for i in run_critics(Draft(status="ответ", answer=a, quote="", file=""), [], q)
+                          if i.critic == "shape"]
+    assert shape("Сколько специалистов нужно?", "в количестве, достаточном для работ") == ["shape"]
+    assert shape("Сколько специалистов нужно?", "не менее 2 (двух)") == []
+    assert shape("Какой размер обеспечения заявки, в рублях?", "не требуется") == []
+    assert shape("До какой даты принимаются заявки?", "до конца ноября") == ["shape"]
+    assert shape("До какой даты принимаются заявки?", "27.11.2026 10:00") == []
+    assert shape("Нужна ли лицензия ФСБ? Ответьте да или нет.", "требуется лицензия ФСТЭК") == ["shape"]
+    assert shape("Где выполняются работы?", "удалённо") == []
+
+
+def test_clause_reference_is_not_a_value():
+    d = Draft(status="ответ", answer="не требуется", quote="Пункт 2.6 извещения признать утратившим силу",
+              file="05_izmeneniya_izveshcheniya.txt",
+              evidence=[{"file": "05_izmeneniya_izveshcheniya.txt", "quote": "Пункт 2.6 извещения признать утратившим силу",
+                         "value": "пункт 2.6 утратил силу"},
+                        {"file": "01_izveshchenie.txt", "value": "2",
+                         "quote": "Участник должен иметь опыт исполнения не менее 2 контрактов"}])
+    assert "conflict" not in [i.critic for i in run_critics(d, NUM_AMEND_DOCS, "Сколько контрактов нужно для опыта?")]
+
+
+def test_crosscheck_ignores_distractor_with_common_words():
+    docs = [doc("04_proekt_kontrakta.txt",
+                "1.1. Заказчик в течение 3 рабочих дней со дня получения счёта осуществляет его проверку.\n"
+                "1.2. Исполнитель в течение 5 рабочих дней устраняет замечания.\n"
+                "1.3. Заказчик в течение 12 (двенадцати) рабочих дней со дня получения документа о приёмке проверяет "
+                "результаты работ.\n")]
+    d = Draft(status="ответ", answer="12", quote="12 (двенадцати) рабочих дней", file="04_proekt_kontrakta.txt")
+    q = "За сколько рабочих дней заказчик проверяет результаты работ после получения документа о приёмке?"
+    assert run_critics(d, docs, q) == []
