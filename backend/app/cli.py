@@ -52,6 +52,11 @@ def main():
     r.add_argument("--concurrency", type=int, help="параллельных запросов к API (по лимиту ключа); "
                                                    "влияет только на скорость")
     sub.add_parser("runs")
+    ld = sub.add_parser("ladder", help="все слои (baseline → промпт → критики → критик-модель) на одном датасете")
+    ld.add_argument("--data", default="sample")
+    ld.add_argument("--role", action="append", default=[], metavar="ROLE=PROFILE")
+    ld.add_argument("--steps", help="через запятую: baseline,prompt,critics,full")
+    ld.add_argument("--concurrency", type=int)
     an = sub.add_parser("analyze", help="какие обманы поймала система и каким критиком")
     an.add_argument("run_id")
     sub.add_parser("models")
@@ -74,6 +79,18 @@ def main():
             s = m.get("score", {})
             print(f"{m['run_id']}  {m['status']:8} {m['pipeline']:8} guard={m['guard']!s:5} "
                   f"index={s.get('index', '—'):>6}  {m['dataset']:18} {m['label']}")
+    elif a.cmd == "ladder":
+        from app.runs import list_ladders, run_ladder
+        if a.concurrency:
+            settings.llm_concurrency = settings.max_concurrency = a.concurrency
+        did = _dataset(a.data)
+        lid = asyncio.run(run_ladder(did, dict(x.split("=", 1) for x in a.role) or None,
+                                     a.steps.split(",") if a.steps else None))
+        lad = next(x for x in list_ladders() if x["id"] == lid)
+        print(f"лесенка {lid}, датасет {lad['dataset_name']}")
+        for st in lad["steps"]:
+            print(f"  {st['title']:34} индекс {st['index']!s:>6}  верно {st['correct']}  не знаю {st['careful']}  "
+                  f"обман {st['lies']}  запросов {st['llm_calls']}  {st['elapsed_s']} с")
     elif a.cmd == "analyze":
         from app.analysis import analyze
         r = analyze(a.run_id)

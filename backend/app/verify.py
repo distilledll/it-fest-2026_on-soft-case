@@ -26,11 +26,27 @@ def numbers(s: str) -> list[float]:
 YEARS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\([^)]{1,30}\)\s*)?(?:год\w*|лет)\b", re.I)
 
 
+MONTHS = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "май": 5, "июн": 6, "июл": 7, "авг": 8, "сен": 9,
+          "окт": 10, "ноя": 11, "дек": 12}
+MONTH_DATE_RE = re.compile(r"\b(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[яй]|июн\w*|июл\w*|август\w*|"
+                           r"сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)\s+(\d{4})", re.I)
+SCALE_RE = re.compile(r"(\d+(?:[  ]\d{3})*(?:[.,]\d+)?)\s*(тыс\w*\.?|млн\.?|миллион\w*|млрд\.?)", re.I)
+_SCALES = {"тыс": 1e3, "млн": 1e6, "мил": 1e6, "млр": 1e9}
+
+
 def number_pool(text: str) -> list[float]:
-    """Все числа фрагмента: цифрами, словами («пятидесяти тысяч»), и сроки в годах, пересчитанные в месяцы."""
+    """Все числа фрагмента: цифрами, словами («пятидесяти тысяч»), с множителями («1 250 тыс. руб.»),
+    и сроки в годах, пересчитанные в месяцы."""
     pool = numbers(text) + word_numbers(text)
     for m in YEARS_RE.finditer(text or ""):
         pool.append(float(m.group(1).replace(",", ".")) * 12)
+    for m in MONTH_DATE_RE.finditer(text or ""):
+        day, month = int(m.group(1)), MONTHS[m.group(2).lower()[:3]]
+        pool += [float(f"{day}.{month:02d}"), float(m.group(3))]
+    for m in SCALE_RE.finditer(text or ""):
+        base = numbers(m.group(1))
+        if base:
+            pool.append(round(base[0] * _SCALES[m.group(2).lower()[:3]], 2))
     return pool
 
 

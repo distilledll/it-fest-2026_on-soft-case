@@ -6,7 +6,7 @@
 import re
 from dataclasses import dataclass
 
-from app.ingest import INJECTION_RE
+from app.ingest import is_injection
 from app.pipeline.agent.critics import is_amendment_doc
 from app.schemas import Document
 
@@ -30,7 +30,7 @@ def redact(text: str) -> tuple[str, int]:
         return "[фрагмент удалён: похоже на инструкцию для ИИ, это не часть условий закупки]"
 
     sents = re.split(r"(?<=[.!?\n])", text)
-    out = "".join(sub(None) if INJECTION_RE.search(s) else s for s in sents)
+    out = "".join(sub(None) if is_injection(s) else s for s in sents)
     return out, n
 
 

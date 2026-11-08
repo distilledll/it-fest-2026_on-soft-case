@@ -11,7 +11,7 @@ from app import datasets
 from app.config import settings
 from app.datasets import DatasetError
 from app.pipeline.base import PIPELINES
-from app.runs import list_runs, new_run_id, read_meta, run_set
+from app.runs import LADDER, list_ladders, list_runs, new_run_id, read_meta, run_ladder, run_set
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 _tasks: set[asyncio.Task] = set()
@@ -107,3 +107,53 @@ def compare(before: str, after: str):
                 "why_before": b[i]["why"], "why_after": a[i]["why"]}
                for i in sorted(a) if i in b and a[i]["verdict"] != b[i]["verdict"]]
     return {"before": out["before"]["meta"], "after": out["after"]["meta"], "changed": changed}
+
+
+# ---------------------------------------------------------------- лесенки для графика «было → стало»
+ladders_router = APIRouter(prefix="/api/ladders", tags=["ladders"])
+
+
+class LadderIn(BaseModel):
+    dataset: str = "sample"
+    roles: dict[str, str] | None = None
+    steps: list[str] | None = None
+
+
+@ladders_router.get("/steps")
+def ladder_steps():
+    return [{"step": s, "title": t, "pipeline": p, "options": o, "guard": g} for s, t, p, o, g in LADDER]
+
+
+@ladders_router.post("", status_code=202)
+async def start_ladder(body: LadderIn):
+    try:
+        info = datasets.info(body.dataset)
+    except DatasetError as e:
+        raise HTTPException(404, str(e))
+    if not info["has_questions"]:
+        raise HTTPException(422, "в датасете нет questions.csv")
+    lid = new_run_id()
+    t = asyncio.create_task(run_ladder(body.dataset, body.roles, body.steps, ladder_id=lid))
+    _tasks.add(t)
+    t.add_done_callback(_tasks.discard)
+    return {"ladder_id": lid}
+
+
+@ladders_router.get("")
+def ladders():
+    """Готово для графика: по каждой лесенке — шаги по порядку с индексом, верно/не знаю/обман и разбивкой по типам."""
+    return list_ladders()
+
+
+@ladders_router.get("/{ladder_id}")
+def ladder_detail(ladder_id: str):
+    """Шаги + вклад критиков (по trace шагов с критиками): сколько обманов поймал каждый и сколько ложных тревог."""
+    lad = next((x for x in list_ladders() if x["id"] == ladder_id), None)
+    if not lad:
+        raise HTTPException(404)
+    from app.analysis import analyze
+    for st in lad["steps"]:
+        if st["step"] in ("critics", "full") and st["status"] == "done":
+            r = analyze(st["run_id"])
+            st["per_critic"], st["caught"], st["false_alarms"] = r["per_critic"], r["caught"], r["false_alarms"]
+    return lad

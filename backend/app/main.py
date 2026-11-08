@@ -11,7 +11,7 @@ settings.datasets_dir.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ОНСОФТ: ИИ, который не обманывает")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-for r in (datasets.router, models.router, ask.router, runs.router):
+for r in (datasets.router, models.router, ask.router, runs.router, runs.ladders_router):
     app.include_router(r)
 
 

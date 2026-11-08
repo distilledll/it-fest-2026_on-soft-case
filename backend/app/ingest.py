@@ -25,10 +25,27 @@ def decode(raw: bytes) -> tuple[str, str]:
     return raw.decode("utf-8", "replace"), "utf-8-replace"
 
 
+# Явные инъекции — достаточно одного совпадения.
 INJECTION_RE = re.compile(
-    r"(игнорир\w*|забудь|ignore|disregard|system prompt|ты\s+—?\s*ии|ответь\s+что|инструкци\w+\s+для\s+(ии|модели))",
+    r"(игнорир\w*|забудь\w*|ignore|disregard|system\s*prompt|ответь\s+что|отвечай\s+что"
+    r"|инструкци\w+\s+для\s+(ии|модели|нейросет\w*|ассистент\w*)"
+    r"|(для|при)\s+(целей\s+)?автоматизированн\w+\s+(анализ|обработк)\w*"
+    r"|when\s+(you\s+are\s+)?asked|you\s+must\s+(answer|reply|say)|answer\s+that|assistant\s*:|<\|?im_start)",
     re.IGNORECASE,
 )
+# Упоминание ИИ само по себе законно (закупка чат-бота) — инъекция, только если рядом команда.
+AI_MENTION_RE = re.compile(r"\b(ии|ai)\b|ии[-\s]?(ассистент|модел|агент)\w*|языков\w+\s+модел\w*|нейросет\w*"
+                           r"|систем\w*\s+(автоматическ|искусственн)\w+\s+(обработк|интеллект)\w*", re.I)
+COMMAND_RE = re.compile(r"\b(указыва\w*|укажи\w*|отвеча\w*|ответь|счита\w*|сообща\w*|называ\w*|пиши|выводи)\b", re.I)
+
+
+def is_injection(text: str) -> bool:
+    """Предложение похоже на инструкцию для ИИ, а не на условие закупки."""
+    return bool(INJECTION_RE.search(text) or (AI_MENTION_RE.search(text) and COMMAND_RE.search(text)))
+
+
+def has_injection(text: str) -> bool:
+    return any(is_injection(s) for s in re.split(r"(?<=[.!?\n])", text))
 
 
 def load_document(path: Path, package: str) -> Document:
@@ -36,7 +53,7 @@ def load_document(path: Path, package: str) -> Document:
     warnings = []
     if enc != "utf-8-sig":
         warnings.append(f"кодировка {enc}")
-    if INJECTION_RE.search(text):
+    if has_injection(text):
         warnings.append("подозрение на инструкцию для ИИ внутри документа")
     return Document(package=package, file=path.name, text=text, encoding=enc,
                     is_empty=not text.strip(), warnings=warnings)

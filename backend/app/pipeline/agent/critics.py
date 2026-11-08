@@ -10,7 +10,7 @@ import operator
 import re
 from dataclasses import dataclass, field
 
-from app.ingest import norm
+from app.ingest import is_injection, norm
 from app.schemas import Document
 from app.numwords import word_numbers
 from app.verify import nearby, number_pool, numbers, quote_exists, snap_quote
@@ -71,6 +71,27 @@ class Amendment:
     old_prefix: str
     new_text: str
     old_sentence: str = ""     # полное старое предложение из целевого файла (если нашли)
+    repealed: bool = False     # пункт признан утратившим силу — требования больше нет
+    clause: str = ""           # номер пункта, если изменение ссылается на номер
+
+
+AMEND_NUM_RE = re.compile(
+    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[\w.\-]+)\)\s*)?[^«\n]{0,80}?"
+    r"изложить\s+в\s+(?:следующей|новой)\s+редакции:?\s*«(?P<new>.+?)»", re.M)
+REPEAL_RE = re.compile(
+    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[\w.\-]+)\)\s*)?[^\n]{0,80}?"
+    r"(?:признать|считать)\s+утратившим\s+силу", re.M)
+
+
+def _notice_file(docs: list[Document]) -> str | None:
+    return next((d.file for d in docs if "izveshch" in d.file.lower() and not is_amendment_doc(d)), None)
+
+
+def _clause_sentence(text: str, num: str) -> str:
+    for sent in _sentences(text):
+        if re.match(rf"\s*{re.escape(num)}\.?\s", sent):
+            return sent
+    return ""
 
 
 def is_amendment_doc(d: Document) -> bool:
@@ -93,24 +114,52 @@ def parse_amendments(docs: list[Document]) -> list[Amendment]:
                         a.old_sentence = sent
                         break
             out.append(a)
+        for m in AMEND_NUM_RE.finditer(d.text):
+            target = m["file"] or _notice_file(docs)
+            old_sent = _clause_sentence(by_file[target].text, m["num"]) if target in by_file else ""
+            out.append(Amendment(d.file, target or "", old_sent[:80], m["new"].strip(), old_sent, clause=m["num"]))
+        for m in REPEAL_RE.finditer(d.text):
+            target = m["file"] or _notice_file(docs)
+            old_sent = _clause_sentence(by_file[target].text, m["num"]) if target in by_file else ""
+            out.append(Amendment(d.file, target or "", old_sent[:80], "", old_sent, repealed=True, clause=m["num"]))
     return out
 
 
 def superseded_by(quote: str, file: str, amendments: list[Amendment]) -> Amendment | None:
-    """Цитата взята из старой редакции (в исходном файле или в «Пункт «…»» внутри изменений)?"""
+    """Цитата взята из старой редакции? Старая редакция — это пункт в исходном файле (в том числе
+    вместе с номером «2.5. …») или текст после «Пункт «…»» внутри самого файла изменений."""
     q = norm(quote)
     if not q:
         return None
     for a in amendments:
-        if a.old_sentence and q in norm(a.old_sentence) and file != a.amend_file:
-            return a
-        if q in norm(a.old_prefix) and q not in norm(a.new_text):
-            return a
+        prefix, old, new = norm(a.old_prefix), norm(a.old_sentence), norm(a.new_text)
+        if file != a.amend_file:
+            if old and (q in old or old in q):
+                return a
+            if len(prefix) >= 15 and prefix in q:
+                return a
+        else:
+            if q in prefix and q not in new:
+                return a
+            if len(prefix) >= 15 and prefix in q and new not in q:
+                return a
     return None
 
 
+CLAUSE_NO = re.compile(r"^\d+(?:\.\d+)*\.?$")
+
+
 def _sentences(text: str) -> list[str]:
-    return [s for s in re.split(r"(?<=[.;])\s+|\n+", text) if s.strip()]
+    """Предложения; номер пункта («2.5.») не отрывается от текста пункта."""
+    out: list[str] = []
+    for part in re.split(r"(?<=[.;])\s+|\n+", text):
+        if not part.strip():
+            continue
+        if out and CLAUSE_NO.match(out[-1].strip()):
+            out[-1] = f"{out[-1]} {part}"
+        else:
+            out.append(part)
+    return out
 
 
 # ---------------------------------------------------------------- критики
@@ -163,6 +212,11 @@ def critic_amendment(d: Draft, docs: list[Document], question: str, amendments: 
     if not amendments or d.status in ("нет в документах", "не знаю"):
         return []
     a = superseded_by(d.quote, d.file, amendments)
+    if a and a.repealed:
+        return [Issue("amendment",
+                      f"цитата из пункта {a.clause}, который признан утратившим силу в {a.amend_file} — этого требования "
+                      f"больше нет. Ответь «не требуется» и процитируй фразу об утрате силы",
+                      data={"old": a.old_sentence, "file": a.amend_file, "repealed": True})]
     if a:
         return [Issue("amendment",
                       f"цитата из старой редакции, этот пункт изменён в {a.amend_file}. "
@@ -184,7 +238,7 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
     live = []
     for e in d.evidence:
         q, f = e.get("quote", ""), e.get("file", "")
-        if not quote_exists(q, docs) or superseded_by(q, f, amendments):
+        if not quote_exists(q, docs) or superseded_by(q, f, amendments) or is_injection(nearby(q, docs, f, width=80)):
             continue
         nums = numbers(e.get("value", "")) or numbers(q)
         if nums:
@@ -279,7 +333,8 @@ def critic_crosscheck(d: Draft, docs: list[Document], question: str, amendments:
     found = []
     for doc in docs:
         for sent in _sentences(doc.text):
-            if superseded_by(sent, doc.file, amendments) or any(norm(sent) in norm(a.old_prefix) for a in amendments):
+            if (superseded_by(sent, doc.file, amendments) or is_injection(sent)
+                    or any(norm(sent) in norm(a.old_prefix) for a in amendments)):
                 continue
             um = [x for x in UNIT_RE.finditer(sent) if x.group(1).lower()[:5] == unit]
             if not um or len(q_stems & _stems(sent)) < min(2, len(q_stems)):
