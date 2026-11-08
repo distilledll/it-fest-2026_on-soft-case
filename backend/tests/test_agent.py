@@ -595,3 +595,29 @@ def test_calc_understands_thousands():
                           "устанавливается в размере 5 % от цены контракта.\n")]
     d = Draft(status="ответ", answer="62500", quote="5 % от цены контракта", file="01.txt", calc="1250000 * 5 / 100")
     assert run_critics(d, docs, "Сколько рублей составит обеспечение исполнения контракта, если контракт заключат по НМЦК?") == []
+
+
+def test_map_extract_reads_chunks_and_answers_from_evidence(monkeypatch):
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            if "27.11.2026" in text:
+                return json.dumps({"quotes": ["Дата и время окончания срока подачи заявок: 27.11.2026 10:00 (время московское)."]},
+                                  ensure_ascii=False)
+            return json.dumps({"quotes": []})
+        return json.dumps({"status": "ответ", "answer": "27.11.2026 10:00", "quote": "27.11.2026 10:00 (время московское)",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    ctx = Context(models=CTX.models, options={"quote_first": True, "map_extract": True, "llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="До какой даты принимаются заявки?"),
+                                           DOCS, ctx))
+    assert a.status == Status.ANSWER and a.answer.startswith("27.11.2026")
+    chunk_calls = [t for t in seen if "ФРАГМЕНТ одного документа" in t]
+    assert len(chunk_calls) == 3                                   # три непустых файла — три фрагмента
+    step = next(t for t in a.trace if t.node == "extract")
+    assert "по фрагментам" in step.message and "проверено 1" in step.message
+    assert "[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]" in seen[-1]                     # reduce видит размеченные выписки
