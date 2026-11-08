@@ -35,7 +35,10 @@ class ModelProfile(BaseModel):
     extra_headers: str = ""          # "User-Agent=...;X-Foo=bar" — шлюз может резать дефолтный UA SDK
     temperature: float = 0.0         # для честного «было/стало» — 0
     max_tokens: int | None = None
-    disable_thinking: bool = False   # chat_template_kwargs.enable_thinking=false (vLLM/Qwen)
+    # По умолчанию рассуждения выключены (chat_template_kwargs.enable_thinking=false — vLLM/SGLang, Qwen3):
+    # так советуют организаторы, ответ ~2 с вместо 20–40 с, точность агент добирает проверками.
+    # Для API, которые не знают этого поля (напр. OpenAI), ставьте false.
+    disable_thinking: bool = True
     json_mode: bool = True           # response_format={"type": "json_object"}, если API поддерживает
     reasoning_effort: str | None = None   # low | medium | high — для моделей с рассуждениями
     extra_body: dict[str, Any] = Field(default_factory=dict)

@@ -63,7 +63,7 @@ class ModelProfileOut(Out):
     extra_headers: str = ""
     temperature: float = 0.0
     max_tokens: int | None = None
-    disable_thinking: bool = False
+    disable_thinking: bool = Field(True, description="выключить рассуждения (по умолчанию да)")
     json_mode: bool = True
     reasoning_effort: str | None = None
     extra_body: dict = {}
