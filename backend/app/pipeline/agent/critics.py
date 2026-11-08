@@ -6,6 +6,7 @@
 Набор критиков включается через ctx.options["critics"] — так меряем вклад каждого.
 """
 import ast
+from contextvars import ContextVar
 import operator
 import re
 from dataclasses import dataclass, field
@@ -183,9 +184,14 @@ def critic_quote(d: Draft, docs: list[Document], question: str, amendments: list
                   data={"quote": d.quote})]
 
 
+# опция multipart: числа ответа можно подтверждать любой проверенной цитатой из evidence (вопросы из нескольких
+# частей, где части в разных местах документов). ContextVar — чтобы параллельные вопросы не мешали друг другу.
+MULTIPART_CTX: ContextVar[bool] = ContextVar("multipart", default=True)
+
+
 def critic_number(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
     """Каждое число из ответа должно быть в цитате или рядом с ней в том же месте документа
-    (для расхождения — ещё и в подтверждённых evidence)."""
+    (для расхождения и вопросов из нескольких частей — ещё и в подтверждённых evidence)."""
     if d.status not in ("ответ", "расхождение") or is_calc(question):
         return []
     a_nums = numbers(d.answer)
@@ -193,7 +199,7 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
         return []
     around = nearby(d.quote, docs, d.file)
     pool = number_pool(around)
-    if d.status == "расхождение":
+    if d.status == "расхождение" or MULTIPART_CTX.get():
         for e in d.evidence:
             if quote_exists(e.get("quote", ""), docs):
                 ev = nearby(e["quote"], docs, e.get("file", ""))
@@ -203,8 +209,9 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
         return [Issue("number", f"для значений {missing} нет подтверждающей цитаты — добавь в evidence "
                                 f"дословную цитату для каждого значения расхождения", data={"missing": missing})]
     if missing:
+        hint = " (если вопрос из нескольких частей — приведи в evidence цитату на каждую часть)" if MULTIPART_CTX.get() else ""
         return [Issue("number", f"чисел {missing} нет в цитате «{d.quote[:120]}» — возьми число из цитаты "
-                                f"или приведи цитату, где оно есть", data={"missing": missing})]
+                                f"или приведи цитату, где оно есть{hint}", data={"missing": missing})]
     return []
 
 
@@ -244,14 +251,26 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
         # значение — из поля value; из цитаты только без номера пункта («2.6. Требование…» — не значение 2.6)
         nums = numbers(e.get("value", "")) or numbers(CLAUSE_PREFIX.sub("", q))
         if nums:
-            live.append((f, nums[0], q))
-    distinct = {v for _, v, _ in live}
-    files = {f for f, _, _ in live}
+            live.append((f, nums[0], q, str(e.get("part") or "1")))
+    distinct = {v for _, v, _, _ in live}
+    files = {f for f, _, _, _ in live}
     if d.status == "ответ" and len(distinct) > 1 and len(files) > 1:
-        desc = "; ".join(f"{v:g} в {f} («{q[:60]}»)" for f, v, q in live)
-        return [Issue("conflict", f"в документах разные значения: {desc}. Если это один и тот же параметр — "
-                                  f"статус «расхождение» и оба значения в answer", severity="warn",
-                      data={"values": sorted(distinct)})]
+        # сравниваем только упоминания одной и той же части вопроса (вопрос из нескольких частей — не расхождение)
+        groups: dict[str, list] = {}
+        for row in live:
+            groups.setdefault(row[3], []).append(row)
+        a_nums = numbers(d.answer)
+        answered_all = all(any(abs(v - a) < 0.01 for a in a_nums) for v in distinct)
+        for rows in groups.values():
+            vals, fls = {r[1] for r in rows}, {r[0] for r in rows}
+            if len(vals) < 2 or len(fls) < 2:
+                continue
+            if len(groups) == 1 and MULTIPART_CTX.get() and answered_all and ";" in d.answer:
+                continue   # части не размечены, но ответ уже содержит все значения по частям
+            desc = "; ".join(f"{v:g} в {f} («{q[:60]}»)" for f, v, q, _ in rows)
+            return [Issue("conflict", f"в документах разные значения: {desc}. Если это один и тот же параметр — "
+                                      f"статус «расхождение» и оба значения в answer", severity="warn",
+                          data={"values": sorted(vals)})]
     if d.status == "расхождение":
         a_nums = set(numbers(d.answer))
         if len(a_nums) < 2:

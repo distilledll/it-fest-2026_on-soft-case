@@ -9,6 +9,8 @@
   llm_critic: bool        включён ли критик-модель (по умолчанию True)
   max_attempts: int       сколько раз модель может отвечать (по умолчанию 3)
   context_chars: int      сколько символов документов влезает целиком (по умолчанию 60000)
+  multipart: bool         правило про вопросы из нескольких частей + числа подтверждаются любым evidence (True)
+  decompose: bool         отдельный запрос разбивает вопрос на подвопросы (False — включать по замеру)
 """
 import operator
 from typing import Annotated, Any, TypedDict
@@ -19,7 +21,7 @@ from app import llm
 from app.ingest import norm
 from app.pipeline.agent import prompts
 from app.pipeline.agent.context import build_context
-from app.pipeline.agent.critics import CRITICS, Draft, Issue, run_critics
+from app.pipeline.agent.critics import CRITICS, MULTIPART_CTX, Draft, Issue, run_critics
 from app.schemas import Document, Status, TraceStep
 
 STATUSES = {s.value for s in Status}
@@ -52,7 +54,8 @@ def _opt(ctx, key, default):
 async def prepare(state: State, config) -> dict:
     docs, ctx = _cfg(config)
     context, info = build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000))
-    msgs = [{"role": "system", "content": prompts.SYSTEM},
+    rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
+    msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
             {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
     notes = [f"режим: {info['mode']}"]
     if info["redacted"]:
@@ -61,6 +64,27 @@ async def prepare(state: State, config) -> dict:
         notes.append(f"пустые файлы: {', '.join(info['empty'])}")
     return {"context": context, "messages": msgs, "attempts": 0, "llm_calls": 0, "warned": [],
             "trace": [TraceStep(node="prepare", ok=True, message="; ".join(notes), data=info)]}
+
+
+async def decompose(state: State, config) -> dict:
+    """Опция decompose: отдельный запрос разбивает вопрос на подвопросы, они добавляются в задание модели."""
+    _, ctx = _cfg(config)
+    if not _opt(ctx, "decompose", False):
+        return {}
+    raw = await llm.chat(ctx.model("answer"), json=True, messages=[
+        {"role": "user", "content": prompts.DECOMPOSE.format(question=state["question"])}])
+    calls = state["llm_calls"] + 1
+    try:
+        parts = [str(x).strip() for x in llm.parse_json(raw).get("parts", []) if str(x).strip()]
+    except (ValueError, TypeError, AttributeError):
+        parts = []
+    if len(parts) < 2:
+        return {"llm_calls": calls, "trace": [TraceStep(node="decompose", ok=True, message="вопрос простой")]}
+    msgs = list(state["messages"])
+    msgs[-1] = {**msgs[-1], "content": msgs[-1]["content"] + prompts.DECOMPOSED.format(
+        parts="\n".join(f"{i}) {x}" for i, x in enumerate(parts, 1)))}
+    return {"messages": msgs, "llm_calls": calls,
+            "trace": [TraceStep(node="decompose", ok=True, message=f"частей: {len(parts)}", data={"parts": parts})]}
 
 
 async def answer(state: State, config) -> dict:
@@ -93,7 +117,11 @@ async def check(state: State, config) -> dict:
     if d is None:
         return {}
     enabled = _opt(ctx, "critics", list(CRITICS))
-    issues = run_critics(d, docs, state["question"], enabled)
+    token = MULTIPART_CTX.set(bool(_opt(ctx, "multipart", True)))
+    try:
+        issues = run_critics(d, docs, state["question"], enabled)
+    finally:
+        MULTIPART_CTX.reset(token)
     # warn — один повтор на критика; если модель настаивает, оставляем её решение
     fresh = [i for i in issues if i.severity == "error" or i.critic not in state["warned"]]
     warned = state["warned"] + [i.critic for i in fresh if i.severity == "warn"]
@@ -170,11 +198,12 @@ def after_critic(state: State, config) -> str:
 
 def build():
     g = StateGraph(State)
-    for name, fn in (("prepare", prepare), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
+    for name, fn in (("prepare", prepare), ("decompose", decompose), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
                      ("retry", retry), ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "prepare")
-    g.add_edge("prepare", "answer")
+    g.add_edge("prepare", "decompose")
+    g.add_edge("decompose", "answer")
     g.add_edge("answer", "check")
     g.add_conditional_edges("check", after_check, ["retry", "llm_critic", "finalize"])
     g.add_conditional_edges("llm_critic", after_critic, ["retry", "finalize"])
@@ -191,7 +220,7 @@ def _evidence(raw) -> list[dict]:
     out = []
     for e in raw if isinstance(raw, list) else []:
         if isinstance(e, dict):
-            out.append({k: "" if e.get(k) is None else str(e.get(k)) for k in ("file", "quote", "value")})
+            out.append({k: "" if e.get(k) is None else str(e.get(k)) for k in ("file", "quote", "value", "part")})
     return out
 
 

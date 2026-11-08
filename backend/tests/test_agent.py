@@ -409,3 +409,54 @@ def test_clause_numbers_are_not_conflicting_values():
               evidence=[{"file": "01_izveshchenie.txt", "quote": "2.2. Участник должен иметь лицензию на техническую защиту информации", "value": "лицензия ТЗИ"},
                         {"file": "01_izveshchenie.txt", "quote": "2.6. Требование о наличии лицензии ФСБ России не установлено", "value": "не установлено"}])
     assert run_critics(d, docs, "Какие лицензии должны быть у участника?") == []
+
+
+MP_DOCS = [doc("01_izveshchenie.txt", "Срок поставки товара — 20 календарных дней с даты заключения контракта.\n"),
+           doc("04_proekt_kontrakta.txt", "Гарантийный срок на товар составляет 36 месяцев.\n")]
+MP_Q = "Какой срок поставки в календарных днях и какой гарантийный срок в месяцах?"
+MP_DRAFT = dict(status="ответ", answer="20; 36", quote="Срок поставки товара — 20 календарных дней",
+                file="01_izveshchenie.txt",
+                evidence=[{"file": "01_izveshchenie.txt", "quote": "Срок поставки товара — 20 календарных дней", "value": "20",
+                           "part": 1},
+                          {"file": "04_proekt_kontrakta.txt", "quote": "составляет 36 месяцев", "value": "36", "part": 2}])
+
+
+def test_multipart_numbers_confirmed_by_evidence():
+    from app.pipeline.agent.critics import MULTIPART_CTX
+    assert run_critics(Draft(**MP_DRAFT), MP_DOCS, MP_Q) == []
+    token = MULTIPART_CTX.set(False)           # без multipart — второе число «не подтверждено»
+    try:
+        assert [i.critic for i in run_critics(Draft(**MP_DRAFT), MP_DOCS, MP_Q)] == ["number"]
+    finally:
+        MULTIPART_CTX.reset(token)
+
+
+def test_decompose_adds_parts_to_prompt(monkeypatch):
+    calls = script(monkeypatch, [{"parts": ["Какой срок поставки?", "Какой гарантийный срок?"]}, MP_DRAFT])
+    ctx = Context(models=CTX.models, options={"decompose": True, "llm_critic": False})
+    a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question=MP_Q), MP_DOCS, ctx))
+    assert a.status == Status.ANSWER and a.llm_calls == 2
+    assert "1) Какой срок поставки?" in calls[1][1]["content"]
+    assert [t.node for t in a.trace][:2] == ["prepare", "decompose"]
+
+
+def test_multipart_rule_toggles_prompt(monkeypatch):
+    simple = {"status": "ответ", "answer": "20", "quote": "Срок поставки товара — 20 календарных дней",
+              "file": "01_izveshchenie.txt"}
+    calls = script(monkeypatch, [simple, simple])
+    for mp in (True, False):
+        ctx = Context(models=CTX.models, options={"multipart": mp, "llm_critic": False})
+        asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question=MP_Q), MP_DOCS, ctx))
+    assert "нескольких частей" in calls[0][0]["content"] and "нескольких частей" not in calls[1][0]["content"]
+
+
+def test_multipart_without_part_labels_is_not_conflict():
+    d = dict(MP_DRAFT, evidence=[{k: v for k, v in e.items() if k != "part"} for e in MP_DRAFT["evidence"]])
+    assert run_critics(Draft(**d), MP_DOCS, MP_Q) == []
+
+
+def test_real_conflict_within_one_part_still_caught():
+    docs = MP_DOCS + [doc("03_opisanie_obekta.txt", "Срок поставки — 30 календарных дней.\n")]
+    d = dict(MP_DRAFT, evidence=MP_DRAFT["evidence"] + [
+        {"file": "03_opisanie_obekta.txt", "quote": "Срок поставки — 30 календарных дней", "value": "30", "part": 1}])
+    assert "conflict" in [i.critic for i in run_critics(Draft(**d), docs, MP_Q)]
