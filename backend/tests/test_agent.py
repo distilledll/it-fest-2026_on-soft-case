@@ -631,7 +631,7 @@ def test_strategy_from_model_profile():
                                            agent_options={"strategy": "map"}),
                               ModelProfile(id="strong", name="s", base_url="http://x", model="s")],
                     roles={"answer": "strong"}))
-    assert make_context().options == {}
+    assert make_context().options == {"strategy": "auto"}
     weak = make_context({"answer": "weak"}).options
     assert weak["quote_first"] and weak["map_extract"]
     assert make_context({"answer": "weak"}, {"strategy": "full"}).options.get("map_extract") is None
@@ -692,3 +692,27 @@ def test_absent_with_repealed_clause_hints_not_required():
                             file="05_izmeneniya_izveshcheniya.txt"), NUM_AMEND_DOCS,
                       "Сколько исполненных контрактов нужно для подтверждения опыта?")
     assert [i.critic for i in iss] == ["absent"] and "утратившим силу" in iss[0].message
+
+
+def test_auto_map_when_package_does_not_fit(monkeypatch):
+    """strategy auto: закупка больше context_chars → граф идёт через узел map, а не через фрагменты поиска."""
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            return json.dumps({"quotes": ["2.3. Срок поставки товара — 25 календарных дней с даты заключения контракта."]},
+                              ensure_ascii=False)
+        return json.dumps({"status": "ответ", "answer": "15", "quote": "Срок поставки товара — 15 календарных дней",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    q = Question(id="x", package="T", question="Какой срок поставки?")
+    small = AgentPipeline().answer(q, NUM_AMEND_DOCS, Context(models=CTX.models, options={"llm_critic": False}))
+    a = asyncio.run(small)
+    assert "map" not in [s.node for s in a.trace]
+    big = Context(models=CTX.models, options={"llm_critic": False, "strategy": "auto", "context_chars": 100})
+    a = asyncio.run(AgentPipeline().answer(q, NUM_AMEND_DOCS, big))
+    assert "map" in [s.node for s in a.trace] and any("ФРАГМЕНТ" in s for s in seen)
+    assert a.answer == "15"

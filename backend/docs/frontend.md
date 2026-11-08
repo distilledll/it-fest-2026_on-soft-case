@@ -13,7 +13,7 @@ CORS открыт для всех адресов. Без модели можно
 | `status` ответа | `ответ`, `расхождение`, `нет в документах`, `не знаю` |
 | `verdict` (check.py) | `верно` (+1), `осторожно` (это «не знаю», 0), `обман` (−1) |
 | Индекс доверия | `(верно − обман) / всего × 100`; это главная цифра на дашборде |
-| `node` шага (TraceStep) | `prepare`, `decompose`, `extract`, `votes`, `answer`, `check`, `critic_<имя>`, `llm_critic`, `retry`, `research`, `finalize`, `guard_quote`, `guard_number`, `error` |
+| `node` шага (TraceStep) | `prepare`, `decompose`, `map`, `extract`, `votes`, `answer`, `check`, `critic_<имя>`, `llm_critic`, `retry`, `research`, `finalize`, `guard_quote`, `guard_number`, `error` |
 | `ok` шага | `true` — прошло, `false` — проверка поймала проблему (подсвечивать красным), `null` — служебный шаг |
 | Шаги лесенки | `baseline` → `prompt` → `critics` → `full` (порядок в поле `order`) |
 

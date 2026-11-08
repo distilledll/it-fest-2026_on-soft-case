@@ -1,8 +1,12 @@
 """Агентный цикл на LangGraph.
 
-    prepare → answer → check ──ok──→ llm_critic ──ok──→ finalize
-                 ↑        │ error/warn        │ problem
-                 └────────┴───── retry (пока есть бюджет) ──→ «не знаю»
+    prepare → decompose ─┬──────────────→ answer → check ──ok──→ llm_critic ──ok──→ finalize
+                         └─ map (закупка   ↑         │ error/warn        │ problem
+                            не влезает)    └─────────┴── retry (пока есть бюджет) ──→ «не знаю»
+
+map — map-reduce: модель читает ВСЮ закупку фрагментами и выписывает дословные цитаты, код их проверяет
+(есть ли в документах, не старая ли редакция), answer отвечает только по ним. Включается сам, когда
+закупка не влезает в context_chars (strategy "auto"), или всегда (strategy "map").
 
 Опции (ctx.options), чтобы мерить вклад каждой части:
   critics: list[str]      какие критики кодом включены (по умолчанию все из critics.CRITICS)
@@ -18,7 +22,8 @@
   votes: int              голосование: сколько ответов сравнить на первой попытке (1 — выключено)
   map_extract: bool       с quote_first: модель читает закупку фрагментами (map), ответ — по проверенным выпискам (reduce)
   map_chunk_chars: int    размер фрагмента для map (4000); map_max_chunks — больше стольких фрагментов отбирает поиск (30)
-  strategy: str           "full" (по умолчанию) | "map" (= quote_first + map_extract); можно задать в профиле модели
+  strategy: str           "auto" (по умолчанию: map, только если закупка не влезает в context_chars) |
+                          "full" (без map) | "map" (всегда); можно задать в профиле модели
 """
 import asyncio
 import operator
@@ -48,7 +53,8 @@ class State(TypedDict, total=False):
     pending_warns: list[Issue] # повторный warn, на который модель не отреагировала
     fragments: bool            # модель видит фрагменты, а не документы целиком
     researched: bool           # повторный поиск перед «нет в документах» уже был
-    quotes_ready: bool         # шаг «сначала цитаты» выполнен (опция quote_first)
+    quotes_ready: bool         # шаг «сначала цитаты» выполнен (узел map)
+    auto_map: bool             # map включён автоматически: закупка не влезла в контекст
     vote: dict | None          # итог голосования (опция votes)
     critic_ok: bool
     attempts: int
@@ -114,7 +120,7 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     from app.verify import quote_exists, snap_quote
 
     calls, coverage, stale = 1, "", 0
-    map_mode = bool(_opt(ctx, "map_extract", False))
+    map_mode = bool(_opt(ctx, "map_extract", False)) or state.get("auto_map", False)
     if map_mode:
         got, calls, read_all = await _map_extract(state["question"], docs, ctx)
         coverage = ("Прочитаны ВСЕ фрагменты документов закупки." if read_all else
@@ -295,14 +301,34 @@ def _vote_issue(vote: dict) -> Issue:
                  data={"variants": vote["variants"]})
 
 
+def use_map(state: State, config) -> str:
+    """Дробить ли закупку: явно (quote_first / strategy "map") или сама, если она не влезла в контекст."""
+    _, ctx = _cfg(config)
+    if _opt(ctx, "quote_first", False):
+        return "map"
+    if _opt(ctx, "strategy", "auto") == "auto" and state.get("fragments"):
+        return "map"
+    return "answer"
+
+
+async def map_node(state: State, config) -> dict:
+    docs, ctx = _cfg(config)
+    auto = not _opt(ctx, "quote_first", False)
+    st = {**state, "auto_map": auto}
+    msgs, steps, calls = await _quote_first(st, docs, ctx)
+    if auto:
+        steps = [TraceStep(node="map", ok=None, message="закупка не влезает в контекст модели — читаем её "
+                                                         "целиком по фрагментам (map-reduce)")] + steps
+    # map уже прочитал закупку целиком (или лучшие фрагменты всех файлов) — повторный поиск не нужен
+    return {"messages": msgs, "quotes_ready": True, "auto_map": auto, "researched": True,
+            "llm_calls": state["llm_calls"] + calls, "trace": steps}
+
+
 async def answer(state: State, config) -> dict:
     docs, ctx = _cfg(config)
     prof = ctx.model("answer")
     pre: list[TraceStep] = []
     extra_calls = 0
-    if _opt(ctx, "quote_first", False) and not state.get("quotes_ready"):
-        msgs, pre, extra_calls = await _quote_first(state, docs, ctx)
-        state = {**state, "messages": msgs, "quotes_ready": True}
     raw = await llm.chat(prof, state["messages"], json=True)
     msgs = state["messages"] + [{"role": "assistant", "content": raw}]
     upd = {"messages": msgs, "attempts": state["attempts"] + 1, "llm_calls": state["llm_calls"] + 1 + extra_calls,
@@ -451,12 +477,14 @@ def after_critic(state: State, config) -> str:
 
 def build():
     g = StateGraph(State)
-    for name, fn in (("prepare", prepare), ("decompose", decompose), ("research", research), ("answer", answer), ("check", check), ("llm_critic", llm_critic),
-                     ("retry", retry), ("finalize", finalize)):
+    for name, fn in (("prepare", prepare), ("decompose", decompose), ("map", map_node), ("research", research),
+                     ("answer", answer), ("check", check), ("llm_critic", llm_critic), ("retry", retry),
+                     ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "prepare")
     g.add_edge("prepare", "decompose")
-    g.add_edge("decompose", "answer")
+    g.add_conditional_edges("decompose", use_map, ["map", "answer"])
+    g.add_edge("map", "answer")
     g.add_edge("answer", "check")
     g.add_conditional_edges("check", after_check, ["retry", "research", "llm_critic", "finalize"])
     g.add_edge("research", "answer")

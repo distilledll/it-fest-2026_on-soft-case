@@ -31,6 +31,8 @@ PROGRESS: dict[str, dict] = {}   # run_id -> {"done", "total", "status"}
 STRATEGIES = {
     # вся закупка (или фрагменты поиска, если не влезает) в одном запросе — для сильных моделей
     "full": {},
+    # по умолчанию: full, а если закупка не влезает в контекст модели — map (решает граф, узел map)
+    "auto": {},
     # map-reduce: модель читает закупку фрагментами, ответ — по проверенным и размеченным выпискам
     "map": {"quote_first": True, "map_extract": True},
 }
@@ -41,8 +43,10 @@ def make_context(roles: dict[str, str] | None = None, options: dict | None = Non
     models = llm.resolve_roles(roles)
     merged = dict(models["answer"].agent_options) if "answer" in models else {}
     merged.update(options or {})
-    strategy = merged.get("strategy", "full")
-    return Context(models=models, options={**STRATEGIES.get(strategy, {}), **merged})
+    strategy = merged.setdefault("strategy", "auto")
+    if strategy not in STRATEGIES:
+        raise ValueError(f"нет стратегии {strategy}: {', '.join(STRATEGIES)}")
+    return Context(models=models, options={**STRATEGIES[strategy], **merged})
 
 
 def question_timeout(ctx: Context) -> float:
