@@ -1,48 +1,77 @@
 <script setup lang="ts">
-import { onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 
 import AppIcon from '@/components/AppIcon.vue'
-import { mockAnswer, mockTrace } from '@/api/mock'
+import { askStream } from '@/api/ask'
+import { listDatasets } from '@/api/datasets'
+import { ApiError, isCanceled } from '@/api/http'
 import { useAskModal } from '@/composables/useAskModal'
-import type { Answer, TraceStep } from '@/types'
-import { statusMeta } from '@/utils/presentation'
+import { useDataset } from '@/composables/useDataset'
+import type { Answer, DatasetInfo, TraceStep } from '@/types'
+import { plural, statusMeta } from '@/utils/presentation'
 
-const { open, hide } = useAskModal()
+const { open, preset, hide } = useAskModal()
+const { active } = useDataset()
 
-const packageId = ref('P01')
+const datasets = ref<DatasetInfo[]>([])
+const datasetId = ref('')
+const packageId = ref('')
 const question = ref('')
 const asking = ref(false)
 const answer = ref<Answer | null>(null)
 const steps = ref<TraceStep[]>([])
+const error = ref('')
 
-let timers: number[] = []
+let controller: AbortController | null = null
 
-function clearTimers() {
-  timers.forEach(clearTimeout)
-  timers = []
+const packages = computed(() => datasets.value.find((d) => d.id === datasetId.value)?.packages ?? [])
+const canAsk = computed(() => !asking.value && !!datasetId.value && !!packageId.value && question.value.trim().length >= 3)
+
+function stop() {
+  controller?.abort()
+  controller = null
 }
 
-function ask() {
-  if (asking.value || question.value.trim().length < 3) return
+function reset() {
+  stop()
+  asking.value = false
+  steps.value = []
+  answer.value = null
+  error.value = ''
+}
+
+async function ask() {
+  if (!canAsk.value) return
   asking.value = true
   answer.value = null
   steps.value = []
-  clearTimers()
-  // Заглушка: позже — POST /api/ask/stream (SSE), шаги приходят событием `step`.
-  mockTrace.forEach((step, i) => {
-    timers.push(window.setTimeout(() => steps.value.push(step), 420 * (i + 1)))
-  })
-  timers.push(
-    window.setTimeout(() => {
-      answer.value = { ...mockAnswer, id: 'adhoc' }
-      asking.value = false
-    }, 420 * (mockTrace.length + 1)),
-  )
+  error.value = ''
+  controller = new AbortController()
+  try {
+    await askStream(
+      { dataset: datasetId.value, package: packageId.value, question: question.value.trim(), guard: true },
+      {
+        onStep: (s) => steps.value.push(s),
+        onAnswer: (a) => {
+          answer.value = a
+        },
+      },
+      controller.signal,
+    )
+  } catch (e) {
+    if (e instanceof ApiError) {
+      if (!isCanceled(e)) error.value = e.message
+    } else {
+      error.value = 'Не удалось спросить — сервер не отвечает'
+    }
+  } finally {
+    asking.value = false
+    controller = null
+  }
 }
 
 function close() {
-  clearTimers()
-  asking.value = false
+  reset()
   hide()
 }
 
@@ -50,16 +79,27 @@ function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && open.value) close()
 }
 
-watch(open, (v) => {
+watch(datasetId, () => {
+  if (!packages.value.includes(packageId.value)) packageId.value = packages.value[0] ?? ''
+})
+
+watch(open, async (v) => {
   document.body.style.overflow = v ? 'hidden' : ''
   if (v) {
     window.addEventListener('keydown', onKey)
+    reset()
+    question.value = preset.value
+    try {
+      datasets.value = await listDatasets()
+    } catch {
+      datasets.value = []
+    }
+    const prefer = active.value && datasets.value.some((d) => d.id === active.value?.id) ? active.value.id : (datasets.value[0]?.id ?? '')
+    datasetId.value = prefer
+    if (!packages.value.includes(packageId.value)) packageId.value = packages.value[0] ?? ''
   } else {
     window.removeEventListener('keydown', onKey)
-    clearTimers()
-    asking.value = false
-    steps.value = []
-    answer.value = null
+    reset()
     question.value = ''
   }
 })
@@ -67,7 +107,7 @@ watch(open, (v) => {
 onUnmounted(() => {
   document.body.style.overflow = ''
   window.removeEventListener('keydown', onKey)
-  clearTimers()
+  stop()
 })
 </script>
 
@@ -87,14 +127,22 @@ onUnmounted(() => {
           </p>
         </header>
 
+        <p v-if="!datasets.length" class="callout callout--warn">
+          Ни одного датасета на сервере нет — сначала загрузите архив на странице «Загрузка».
+        </p>
+
         <form class="ask" @submit.prevent="ask">
           <div class="ask__row">
-            <label class="field ask__package">
+            <label class="field ask__pick">
+              <span class="field__label">Набор</span>
+              <select v-model="datasetId" class="select">
+                <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }}</option>
+              </select>
+            </label>
+            <label class="field ask__pick">
               <span class="field__label">Закупка</span>
               <select v-model="packageId" class="select">
-                <option v-for="p in ['P01', 'P02', 'P03', 'P04', 'P05', 'P06']" :key="p" :value="p">
-                  {{ p }}
-                </option>
+                <option v-for="p in packages" :key="p" :value="p">{{ p }}</option>
               </select>
             </label>
             <label class="field ask__text">
@@ -109,7 +157,7 @@ onUnmounted(() => {
           </div>
 
           <div class="ask__actions">
-            <button class="btn btn--primary" type="submit" :disabled="asking || question.trim().length < 3">
+            <button class="btn btn--primary" type="submit" :disabled="!canAsk">
               <span v-if="asking" class="ask__spin" />
               <AppIcon v-else name="message" size="sm" />
               {{ asking ? 'Ищем ответ в документах…' : 'Спросить' }}
@@ -117,9 +165,16 @@ onUnmounted(() => {
           </div>
         </form>
 
+        <p v-if="error" class="callout callout--bad">{{ error }}</p>
+
         <transition name="fade-slide">
           <ol v-if="steps.length" class="trace" aria-label="Что делала система">
-            <li v-for="(s, i) in steps" :key="`${s.node}-${i}`" class="trace__item" :class="s.ok === false ? 'is-bad' : s.ok ? 'is-ok' : ''">
+            <li
+              v-for="(s, i) in steps"
+              :key="`${s.node}-${i}`"
+              class="trace__item"
+              :class="s.ok === false ? 'is-bad' : s.ok ? 'is-ok' : ''"
+            >
               <span class="trace__dot">
                 <AppIcon :name="s.ok === false ? 'close' : 'check'" size="sm" />
               </span>
@@ -135,12 +190,14 @@ onUnmounted(() => {
               <span class="badge" :class="statusMeta[answer.status].cls">
                 {{ statusMeta[answer.status].label }}
               </span>
-              <span class="answer__time muted">{{ answer.elapsed_s }} с · {{ answer.llm_calls }} запроса</span>
+              <span class="answer__time muted">
+                {{ answer.elapsed_s.toFixed(2) }} с · {{ plural(answer.llm_calls, ['обращение', 'обращения', 'обращений']) }} к модели
+              </span>
             </div>
             <p class="answer__value">{{ answer.answer }}</p>
-            <blockquote class="answer__quote">
+            <blockquote v-if="answer.quote" class="answer__quote">
               «{{ answer.quote }}»
-              <cite class="answer__file mono">{{ packageId }}/{{ answer.file }}</cite>
+              <cite v-if="answer.file" class="answer__file mono">{{ packageId }}/{{ answer.file }}</cite>
             </blockquote>
           </div>
         </transition>
@@ -165,8 +222,8 @@ onUnmounted(() => {
   align-items: end;
 }
 
-.ask__package {
-  max-width: 140px;
+.ask__pick {
+  max-width: 200px;
 }
 
 .ask__actions {
@@ -282,10 +339,10 @@ onUnmounted(() => {
 
 @media (min-width: 620px) {
   .ask__row {
-    grid-template-columns: 140px 1fr;
+    grid-template-columns: 1fr 140px 1.6fr;
   }
 
-  .ask__package {
+  .ask__pick {
     max-width: none;
   }
 }
