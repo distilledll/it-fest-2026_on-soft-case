@@ -429,6 +429,47 @@ def critic_shape(d: Draft, docs: list[Document], question: str, amendments: list
     return []
 
 
+def critic_fields(d: Draft, docs: list[Document], question: str, amendments: list[Amendment]) -> list[Issue]:
+    """Второе мнение без модели: извлекатели типовых полей (НМЦК, обеспечение, срок, дата, гарантия)
+    и проверочное правило «обеспечение исполнения в рублях = процент × НМЦК»."""
+    from app.pipeline.agent import fields as F
+
+    def stale(sent: str, file: str) -> bool:
+        return superseded_by(sent, file, amendments) is not None
+
+    if is_calc(question):
+        if d.status != "ответ" or not F.SEC_EXEC_Q.search(question):
+            return []
+        nmck, pct = F.unique(F.BY_KEY["nmck"], docs, stale), F.unique(F.BY_KEY["contract_security_pct"], docs, stale)
+        if not (nmck and pct):
+            return []
+        expected = round(float(nmck[0]) * float(pct[0]) / 100, 2)
+        if not any(abs(expected - a) < 0.01 for a in numbers(d.answer)):
+            return [Issue("fields", f"по документам НМЦК {nmck[0]} × {pct[0]} % = {_fmt(expected)} руб. "
+                                    f"(«{nmck[1][:70]}», «{pct[1][:70]}»), а в ответе {d.answer}",
+                          data={"expected": expected})]
+        return []
+    field = F.field_for(question)
+    if not field or d.status == "не знаю":
+        return []
+    cands = F.candidates(field, docs, stale)
+    vals = {v for v, _, _ in cands}
+    if len(vals) == 1:
+        v, file, sent = cands[0]
+        if d.status == "нет в документах":
+            return [Issue("fields", f"в документах есть {field.title}: {v} («{sent[:120]}», {file}) — ответ есть",
+                          severity="warn", data={"value": v, "file": file})]
+        if d.status == "ответ" and not F.answer_has(field, v, d.answer):
+            return [Issue("fields", f"код нашёл в документах {field.title}: {v} («{sent[:120]}», {file}), "
+                                    f"а в ответе «{d.answer}» — проверь", severity="warn",
+                          data={"value": v, "file": file})]
+    elif len(vals) > 1 and d.status == "ответ" and len({f for _, f, _ in cands}) > 1:
+        desc = "; ".join(f"{v} в {f} («{s_[:60]}»)" for v, f, s_ in cands[:4])
+        return [Issue("fields", f"код нашёл разные значения поля «{field.title}»: {desc}. Возможно, это расхождение",
+                      severity="warn", data={"values": sorted(vals)})]
+    return []
+
+
 CRITICS = {
     "quote": critic_quote,
     "number": critic_number,
@@ -438,6 +479,7 @@ CRITICS = {
     "negation": critic_negation,
     "calc": critic_calc,
     "shape": critic_shape,
+    "fields": critic_fields,
 }
 
 

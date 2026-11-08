@@ -65,12 +65,12 @@ def test_new_redaction_passes():
 
 
 def test_fake_quote():
-    assert crit("Какая НМЦК?", status="ответ", answer="2000000", quote="цена контракта 2 000 000 рублей") == ["quote"]
+    assert crit("Какая НМЦК?", status="ответ", answer="2000000", quote="цена контракта 2 000 000 рублей") == ["quote", "fields"]
 
 
 def test_number_not_in_quote():
     assert crit("Какая НМЦК?", status="ответ", answer="1900000",
-                quote="Начальная (максимальная) цена контракта: 1 800 000,00 руб") == ["number"]
+                quote="Начальная (максимальная) цена контракта: 1 800 000,00 руб") == ["number", "fields"]
 
 
 def test_number_in_words_ok():
@@ -493,3 +493,22 @@ def test_crosscheck_ignores_distractor_with_common_words():
     d = Draft(status="ответ", answer="12", quote="12 (двенадцати) рабочих дней", file="04_proekt_kontrakta.txt")
     q = "За сколько рабочих дней заказчик проверяет результаты работ после получения документа о приёмке?"
     assert run_critics(d, docs, q) == []
+
+
+def test_fields_critic():
+    # однозначное значение кода против неверного ответа модели
+    iss = crit("Какая начальная (максимальная) цена контракта, в рублях?", status="ответ", answer="1700000",
+               quote="Начальная (максимальная) цена контракта: 1 800 000,00 руб", file="01_izveshchenie.txt")
+    assert "fields" in iss
+    # «нет в документах», а код нашёл значение
+    assert crit("Какая начальная (максимальная) цена контракта, в рублях?", status="нет в документах") == ["fields"]
+    # дата подачи — после изменения: старая 24.11 не кандидат, верная 27.11
+    assert "fields" not in crit("До какой даты и времени принимаются заявки?", status="ответ", answer="27.11.2026 10:00",
+                                quote="27.11.2026 10:00 (время московское)", file="05_izmeneniya_izveshcheniya.txt")
+    # правило расчёта: 1 800 000 × 5 % = 90 000
+    d = Draft(status="ответ", answer="91000", quote="5 % от цены контракта", file="01_izveshchenie.txt",
+              calc="1800000 * 5 / 100")
+    q = "Сколько рублей составит обеспечение исполнения контракта, если контракт заключат по НМЦК?"
+    assert run_critics(d, DOCS, q) == [] and d.answer == "90000"     # calc поправил сам код
+    d2 = Draft(status="ответ", answer="95000", quote="5 % от цены контракта", file="01_izveshchenie.txt")
+    assert [i.critic for i in run_critics(d2, DOCS, q, enabled=["fields"])] == ["fields"]
