@@ -12,7 +12,8 @@ map — map-reduce: модель читает закупку фрагмента�
   critics: list[str]      какие критики кодом включены (по умолчанию все из critics.CRITICS)
   llm_critic: bool        включён ли критик-модель (по умолчанию True)
   max_attempts: int       сколько раз модель может отвечать (по умолчанию 3)
-  context_chars: int      сколько символов документов влезает целиком (по умолчанию 60000)
+  context_chars: int      сколько символов документов влезает целиком; по умолчанию — от context_tokens
+                          профиля answer (окно × 3 символа/токен × 0.5), если не задано — 60000
   multipart: bool         правило про вопросы из нескольких частей + числа подтверждаются любым evidence (True)
   decompose: bool         отдельный запрос разбивает вопрос на подвопросы (False — включать по замеру)
   research: bool          в режиме фрагментов перед «нет в документах» — повторный поиск с другими запросами (True)
@@ -72,9 +73,24 @@ def _opt(ctx, key, default):
     return (ctx.options or {}).get(key, default)
 
 
+CHARS_PER_TOKEN = 3.0     # русский текст закупок: ~4 символа на токен (замер на шлюзе), берём с запасом
+DOC_SHARE = 0.5           # половина окна — документам; остальное — промпт, повторы с замечаниями, ответ
+DEFAULT_CONTEXT_CHARS = 60000
+
+
+def context_budget(ctx) -> int:
+    """Сколько символов документов модель читает целиком. Явная опция context_chars важнее;
+    иначе — от окна модели (context_tokens в профиле answer); окно не указано — 60000 с запасом."""
+    explicit = _opt(ctx, "context_chars", None)
+    if explicit:
+        return int(explicit)
+    tokens = getattr(ctx.models.get("answer"), "context_tokens", None) if ctx.models else None
+    return int(tokens * CHARS_PER_TOKEN * DOC_SHARE) if tokens else DEFAULT_CONTEXT_CHARS
+
+
 async def prepare(state: State, config) -> dict:
     docs, ctx = _cfg(config)
-    context, info = await build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000))
+    context, info = await build_context(state["question"], docs, ctx, context_budget(ctx))
     rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
     msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},
             {"role": "user", "content": prompts.USER.format(context=context, question=state["question"])}]
@@ -420,7 +436,7 @@ async def research(state: State, config) -> dict:
         alts = [str(x) for x in llm.parse_json(raw).get("queries", []) if str(x).strip()][:3]
     except (ValueError, TypeError, AttributeError):
         alts = []
-    context, info = await build_context(state["question"], docs, ctx, _opt(ctx, "context_chars", 60000),
+    context, info = await build_context(state["question"], docs, ctx, context_budget(ctx),
                                         queries=[state["question"], *alts], k=20)
     rule = prompts.MULTIPART_RULE if _opt(ctx, "multipart", True) else ""
     msgs = [{"role": "system", "content": prompts.SYSTEM.replace("{multipart_rule}", rule)},

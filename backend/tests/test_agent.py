@@ -793,3 +793,11 @@ def test_auto_map_when_package_does_not_fit(monkeypatch):
     a = asyncio.run(AgentPipeline().answer(q, NUM_AMEND_DOCS, big))
     assert "map" in [s.node for s in a.trace] and any("ФРАГМЕНТ" in s for s in seen)
     assert a.answer == "15"
+
+
+def test_context_budget_from_model_window():
+    from app.pipeline.agent.graph import context_budget
+    big = ModelProfile(id="g", name="g", base_url="http://x", model="m", context_tokens=262144)
+    assert context_budget(Context(models={"answer": big}, options={})) == 393216
+    assert context_budget(Context(models=CTX.models, options={})) == 60000           # окно не указано
+    assert context_budget(Context(models={"answer": big}, options={"context_chars": 1000})) == 1000

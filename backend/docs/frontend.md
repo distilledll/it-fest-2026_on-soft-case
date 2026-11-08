@@ -155,7 +155,7 @@ LLM:
 ```json
 POST /api/models
 {"id": "llm-fast", "name": "Шлюз, без рассуждений", "kind": "chat",
- "base_url": "https://.../api/v1", "model": "cifra48/llm", "api_key": "<ключ>",
+ "base_url": "https://.../api/v1", "model": "cifra48/llm", "api_key": "<ключ>", "context_tokens": 262144,
  "extra_headers": "User-Agent=Mozilla/5.0", "disable_thinking": true}
 ```
 Эмбеддинги:
@@ -167,6 +167,9 @@ POST /api/models
  "embed_query_task": "retrieval.query", "embed_passage_task": "retrieval.passage", "embed_dimensions": 256}
 ```
 - `kind`: `chat` (роли answer/critic) или `embedding` (роль embed). Назначить модель не на свою роль нельзя: 422.
+- `context_tokens` — окно контекста модели в токенах (у шлюза 262144). От него считается, сколько текста
+  закупки модель читает целиком: окно × 3 символа на токен × 0,5 (половина — под промпт, повторы и ответ).
+  Закупка больше — агент читает её фрагментами (map-reduce). Не задано — читается целиком до 60 000 символов.
 - Первый добавленный профиль сам становится ролью `answer` (или `embed` для embedding).
 - `embed_query_task` / `embed_passage_task` / `embed_dimensions` — нестандартные поля запроса `/embeddings`.
   Задавайте, только если API их понимает (шлюз — да; OpenAI понимает только `dimensions`). Не заданы — не отправляются.

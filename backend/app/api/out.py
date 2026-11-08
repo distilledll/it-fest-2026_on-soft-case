@@ -63,6 +63,8 @@ class ModelProfileOut(Out):
     extra_headers: str = ""
     temperature: float = 0.0
     max_tokens: int | None = None
+    context_tokens: int | None = Field(None, description="окно контекста модели в токенах; не задано — "
+                                                         "закупка до 60000 символов читается целиком")
     disable_thinking: bool = Field(True, description="выключить рассуждения (по умолчанию да)")
     json_mode: bool = True
     reasoning_effort: str | None = None

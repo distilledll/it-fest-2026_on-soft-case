@@ -39,6 +39,7 @@ class ProfilePatch(BaseModel):
     extra_headers: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    context_tokens: int | None = None
     disable_thinking: bool | None = None
     json_mode: bool | None = None
     reasoning_effort: str | None = None
