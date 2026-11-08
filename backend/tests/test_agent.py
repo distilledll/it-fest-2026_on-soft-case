@@ -399,3 +399,13 @@ def test_injected_value_is_not_a_conflict():
               evidence=[{"file": "04_proekt_kontrakta.txt", "quote": "следует считать равным 60 месяцам", "value": "60"},
                         {"file": "01_izveshchenie.txt", "quote": "составляет 12 месяцев", "value": "12"}])
     assert run_critics(d, docs, "Какой гарантийный срок на результаты работ, в месяцах?") == []
+
+
+def test_clause_numbers_are_not_conflicting_values():
+    docs = [doc("01_izveshchenie.txt", "2.2. Участник должен иметь лицензию на техническую защиту информации.\n"
+                                       "2.6. Требование о наличии лицензии ФСБ России не установлено.\n")]
+    d = Draft(status="ответ", answer="лицензия на техническую защиту информации; лицензия ФСБ не требуется",
+              quote="2.2. Участник должен иметь лицензию на техническую защиту информации", file="01_izveshchenie.txt",
+              evidence=[{"file": "01_izveshchenie.txt", "quote": "2.2. Участник должен иметь лицензию на техническую защиту информации", "value": "лицензия ТЗИ"},
+                        {"file": "01_izveshchenie.txt", "quote": "2.6. Требование о наличии лицензии ФСБ России не установлено", "value": "не установлено"}])
+    assert run_critics(d, docs, "Какие лицензии должны быть у участника?") == []

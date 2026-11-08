@@ -146,6 +146,7 @@ def superseded_by(quote: str, file: str, amendments: list[Amendment]) -> Amendme
     return None
 
 
+CLAUSE_PREFIX = re.compile(r"^\s*\d+(?:\.\d+)+\.?\s*")
 CLAUSE_NO = re.compile(r"^\d+(?:\.\d+)*\.?$")
 
 
@@ -240,7 +241,8 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
         q, f = e.get("quote", ""), e.get("file", "")
         if not quote_exists(q, docs) or superseded_by(q, f, amendments) or is_injection(nearby(q, docs, f, width=80)):
             continue
-        nums = numbers(e.get("value", "")) or numbers(q)
+        # значение — из поля value; из цитаты только без номера пункта («2.6. Требование…» — не значение 2.6)
+        nums = numbers(e.get("value", "")) or numbers(CLAUSE_PREFIX.sub("", q))
         if nums:
             live.append((f, nums[0], q))
     distinct = {v for _, v, _ in live}
