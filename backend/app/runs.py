@@ -115,9 +115,15 @@ async def run_set(dataset_id: str, pipeline_name: str, label: str = "", use_guar
     return _finish(out, meta, answers, data_dir, time.perf_counter() - t0, run_id)
 
 
+# ошибки самого запроса (400 «не влезает в контекст», 401, 403, 404, 422): повтор ничего не изменит
+PERMANENT = ("BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError",
+             "UnprocessableEntityError")
+
+
 def is_failed(a: Answer) -> bool:
-    """Технический сбой (сеть, тайм-аут, исключение), а не честное «не знаю» модели."""
-    return any(t.node == "error" for t in a.trace)
+    """Технический сбой, который стоит повторить (сеть, тайм-аут), а не честное «не знаю» модели
+    и не ошибка самого запроса."""
+    return any(t.node == "error" and not (t.message or "").startswith(PERMANENT) for t in a.trace)
 
 
 async def _answer_all(pipeline, questions: list[Question], data_dir: Path, ctx: Context, use_guard: bool,

@@ -87,3 +87,11 @@ def test_resume_after_crash(monkeypatch):
     ids = [json.loads(x)["id"] for x in (out / "trace.jsonl").read_text().splitlines()]
     assert ids == ["Q0", "Q1", "Q2", "Q3"]
     assert (out / "answers.csv").read_text().count("\n") == 5
+
+
+def test_request_errors_are_not_retried():
+    from app.schemas import TraceStep
+    too_long = Answer(id="x", status=Status.UNKNOWN, trace=[TraceStep(
+        node="error", ok=False, message="BadRequestError: Error code: 400 - The input is longer than the model's context")])
+    net = Answer(id="y", status=Status.UNKNOWN, trace=[TraceStep(node="error", ok=False, message="APIConnectionError: x")])
+    assert not runs.is_failed(too_long) and runs.is_failed(net)
