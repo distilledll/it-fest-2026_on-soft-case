@@ -675,3 +675,10 @@ def test_map_replaces_hidden_old_clause_with_amendment(monkeypatch):
                                        NUM_AMEND_DOCS, ctx))
     shown = seen[-1].split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
     assert "признан утратившим силу" in shown and "300 000" not in shown
+
+
+def test_absent_with_repealed_clause_hints_not_required():
+    iss = run_critics(Draft(status="нет в документах", quote="Пункт 2.6 извещения признать утратившим силу",
+                            file="05_izmeneniya_izveshcheniya.txt"), NUM_AMEND_DOCS,
+                      "Сколько исполненных контрактов нужно для подтверждения опыта?")
+    assert [i.critic for i in iss] == ["absent"] and "утратившим силу" in iss[0].message

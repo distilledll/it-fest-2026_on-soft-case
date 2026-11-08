@@ -505,7 +505,15 @@ def critic_absent(d: Draft, docs: list[Document], question: str, amendments: lis
     if len(q_stems) < 2:
         return []
     sents = [(doc.file, sent) for doc in docs for sent in _sentences(doc.text)]
-    df = Counter(st for _, sent in sents for st in _stems(sent) & q_stems)
+    # «Пункт 2.6 признать утратившим силу» сам по себе ничего не говорит о теме — добавляем к нему текст
+    # отменённого пункта (код знает его из разбора изменений), чтобы связать утрату силы с вопросом
+    repealed = {a.clause: a.old_sentence for a in amendments if a.repealed and a.old_sentence}
+    topic_of = {}
+    for file, sent in sents:
+        m = REPEAL_RE.search(sent)
+        if m and m["num"] in repealed:
+            topic_of[(file, sent)] = sent + " " + repealed[m["num"]]
+    df = Counter(st for key in sents for st in _stems(topic_of.get(key, key[1])) & q_stems)
     idf = {st: math.log((len(sents) + 1) / (df.get(st, 0) + 1)) + 0.1 for st in q_stems}
     # слова вопроса, которых нет нигде в документах («размер», «цены»), не помогают найти место — не считаем их
     total = sum(w for st, w in idf.items() if df.get(st))
@@ -515,7 +523,7 @@ def critic_absent(d: Draft, docs: list[Document], question: str, amendments: lis
     for file, sent in sents:
         if not has_negation(sent) or is_injection(sent) or superseded_by(sent, file, amendments):
             continue
-        w = sum(idf[st] for st in _stems(sent) & q_stems)
+        w = sum(idf[st] for st in _stems(topic_of.get((file, sent), sent)) & q_stems)
         if w >= 0.5 * total and (best is None or w > best[0]):
             best = (w, file, sent.strip())
     if best:
