@@ -128,6 +128,13 @@ export interface ModelProfilePublic {
   json_mode: boolean
   reasoning_effort: string | null
   extra_body: Record<string, unknown>
+  agent_options?: Record<string, unknown>
+  /** chat — отвечает/проверяет (answer, critic); embedding — векторы для поиска (embed). */
+  kind?: 'chat' | 'embedding'
+  /** только embedding: нестандартные поля запроса /embeddings (шлюз понимает, OpenAI — нет). */
+  embed_query_task?: string | null
+  embed_passage_task?: string | null
+  embed_dimensions?: number | null
   has_key: boolean
 }
 
@@ -159,11 +166,17 @@ export type ProfilePatch = Partial<{
   /** '' — выключить; backend ждёт low|medium|high. */
   reasoning_effort: string
   extra_body: Record<string, unknown>
+  kind: 'chat' | 'embedding'
+  embed_query_task: string | null
+  embed_passage_task: string | null
+  embed_dimensions: number | null
 }>
 
 export type ProfileCreate = ProfilePatch & { name: string; base_url: string; model: string }
 
-export type ProfileTest = { ok: true; reply: string; latency_s: number } | { ok: false; error: string }
+export type ProfileTest =
+  | { ok: true; reply: string; latency_s: number; dimensions?: number }
+  | { ok: false; error: string }
 
 /** GET /api/health */
 export interface PipelineInfo {

@@ -59,20 +59,26 @@ interface Draft {
 const openTypes = reactive({ llm: true, embed: false, rerank: false })
 const draftOpen = ref(false)
 
-/** Заготовка формы эмбеддингов: поля есть, отправка включится с поддержкой протокола на бэкенде. */
+/** Черновик новой embedding-модели; протокол шлюза добавляет к запросу нестандартные поля task. */
 const embedDraft = reactive({
   name: '',
   baseUrl: '',
   model: '',
   apiKey: '',
   protocol: 'gateway' as 'gateway' | 'openai',
-  dimensions: 1024,
+  queryTask: 'retrieval.query',
+  passageTask: 'retrieval.passage',
+  dimensions: 256,
 })
 
 const boundName = (role: RoleName) => {
   const p = profiles.value.find((x) => x.id === roles.value[role])
   return p ? `${p.name} · ${p.model}` : ''
 }
+
+/** Чат-модели отвечают и проверяют, embedding-модели — векторы; бэкенд не даёт mixes путать (422 по kind). */
+const chatProfiles = computed(() => profiles.value.filter((p) => p.kind !== 'embedding'))
+const embedProfiles = computed(() => profiles.value.filter((p) => p.kind === 'embedding'))
 
 const drafts = reactive<Record<string, Draft>>({})
 
@@ -123,6 +129,7 @@ const remote = reactive<Record<string, string[] | 'loading' | string>>({})
 const toDelete = ref('')
 
 const creating = ref(false)
+const creatingEmbed = ref(false)
 interface Fresh extends Draft {
   name: string
   baseUrl: string
@@ -251,6 +258,39 @@ async function create() {
   }
 }
 
+const canCreateEmbed = computed(
+  () =>
+    !!embedDraft.name.trim() && !!embedDraft.baseUrl.trim() && !!embedDraft.model.trim() && !creatingEmbed.value,
+)
+
+/** kind='embedding'; формат шлюза добавляет к запросу нестандартные поля task, OpenAI понимает только dimensions. */
+async function createEmbed() {
+  if (!canCreateEmbed.value) return
+  creatingEmbed.value = true
+  const gateway = embedDraft.protocol === 'gateway'
+  try {
+    const created = await createProfile({
+      name: embedDraft.name.trim(),
+      base_url: embedDraft.baseUrl.trim(),
+      model: embedDraft.model.trim(),
+      api_key: embedDraft.apiKey,
+      kind: 'embedding',
+      embed_dimensions: embedDraft.dimensions || null,
+      embed_query_task: gateway ? embedDraft.queryTask.trim() || 'retrieval.query' : null,
+      embed_passage_task: gateway ? embedDraft.passageTask.trim() || 'retrieval.passage' : null,
+    })
+    Object.assign(embedDraft, { name: '', baseUrl: '', model: '', apiKey: '' })
+    note.value = `Модель «${created.name}» создана`
+    error.value = ''
+    await load()
+  } catch (e) {
+    note.value = ''
+    error.value = reason(e)
+  } finally {
+    creatingEmbed.value = false
+  }
+}
+
 async function remove(p: ModelProfilePublic) {
   try {
     await deleteProfile(p.id)
@@ -264,11 +304,14 @@ async function remove(p: ModelProfilePublic) {
   }
 }
 
-/** Подпись результата проверки подключения одной строкой. */
+/** Подпись результата проверки подключения одной строкой (embedding-модель отвечает размерностью вектора). */
 function testText(id: string): string {
   const r = results[id]
   if (!r || r === 'pending') return ''
-  return r.ok ? `ответ «${r.reply}» за ${r.latency_s} с` : r.error
+  if (!r.ok) return r.error
+  return r.dimensions
+    ? `вектор размерности ${r.dimensions} за ${r.latency_s} с`
+    : `ответ «${r.reply}» за ${r.latency_s} с`
 }
 const testOk = (id: string) => results[id] !== undefined && results[id] !== 'pending' && (results[id] as ProfileTest).ok
 
@@ -333,11 +376,11 @@ onMounted(load)
               <select
                 class="select"
                 :value="roles.answer ?? ''"
-                :disabled="loading || !profiles.length"
+                :disabled="loading || !chatProfiles.length"
                 @change="assignRole('answer', ($event.target as HTMLSelectElement).value)"
               >
                 <option value="">не назначено</option>
-                <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
+                <option v-for="p in chatProfiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
               </select>
               <span class="field__hint">{{ ROLE_HINT.answer }}</span>
             </label>
@@ -346,11 +389,11 @@ onMounted(load)
               <select
                 class="select"
                 :value="roles.critic ?? ''"
-                :disabled="loading || !profiles.length"
+                :disabled="loading || !chatProfiles.length"
                 @change="assignRole('critic', ($event.target as HTMLSelectElement).value)"
               >
                 <option value="">не назначено</option>
-                <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
+                <option v-for="p in chatProfiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
               </select>
               <span class="field__hint">{{ ROLE_HINT.critic }}</span>
             </label>
@@ -372,13 +415,13 @@ onMounted(load)
       </div>
 
       <p v-if="loading" class="muted empty">Загружаем модели…</p>
-      <p v-else-if="!profiles.length" class="muted empty">
+      <p v-else-if="!chatProfiles.length" class="muted empty">
         Пока нет ни одной модели — добавьте её кнопкой ниже или включите бэкенд.
       </p>
 
       <div v-else class="area__list">
         <AccordionItem
-          v-for="p in profiles"
+          v-for="p in chatProfiles"
           :key="p.id"
           data-kind="profile"
           v-model:open="open[p.id]"
@@ -562,19 +605,19 @@ onMounted(load)
           icon="file"
           title="Эмбеддинги"
           subtitle="смысловой поиск фрагментов (POST /embeddings)"
-          badge="ждёт бэкенд-протокол"
-          badge-cls="badge--warn"
+          :badge="roles.embed ? 'привязана' : 'не назначена'"
+          :badge-cls="roles.embed ? 'badge--ok' : 'badge--warn'"
         >
           <label class="field roles__row">
             <span class="field__label">{{ ROLE_LABEL.embed }} <span class="mono">embed</span></span>
             <select
               class="select"
               :value="roles.embed ?? ''"
-              :disabled="loading || !profiles.length"
+              :disabled="loading || !embedProfiles.length"
               @change="assignRole('embed', ($event.target as HTMLSelectElement).value)"
             >
               <option value="">не назначено</option>
-              <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
+              <option v-for="p in embedProfiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
             </select>
             <span class="field__hint">
               <template v-if="roles.embed">привязано: {{ boundName('embed') }}</template>
@@ -582,50 +625,91 @@ onMounted(load)
             </span>
           </label>
 
-          <div class="types__pending">
-            <p class="types__note muted">
-              <AppIcon name="alert" size="sm" />
-              Форма-заготовка: эндпоинт эмбеддингов шлюза не OpenAI-совместим, протокол подключает
-              бэкенд-разработчик. До этого момента добавить модель нельзя.
-            </p>
-            <div class="types__pending-fields" aria-disabled="true">
-              <div class="grid">
-                <label class="field">
-                  <span class="field__label">Название</span>
-                  <input v-model="embedDraft.name" class="input" type="text" placeholder="Эмбеддинги шлюза" />
-                </label>
-                <label class="field">
-                  <span class="field__label">Base URL</span>
-                  <input v-model="embedDraft.baseUrl" class="input" type="url" spellcheck="false" placeholder="https://…/v1" />
-                </label>
-                <label class="field">
-                  <span class="field__label">Модель</span>
-                  <input v-model="embedDraft.model" class="input" type="text" spellcheck="false" placeholder="cifra48/embedding" />
-                </label>
-                <label class="field">
-                  <span class="field__label">API key</span>
-                  <input v-model="embedDraft.apiKey" class="input" type="password" spellcheck="false" autocomplete="off" />
-                </label>
-              </div>
-              <div class="params">
-                <label class="field">
-                  <span class="field__label">Протокол эмбеддингов</span>
-                  <select v-model="embedDraft.protocol" class="select">
-                    <option value="gateway">формат шлюза (не OpenAI)</option>
-                    <option value="openai">OpenAI-совместимый</option>
-                  </select>
-                  <span class="field__hint">Как выглядит тело запроса и ответ. По умолчанию — формат шлюза.</span>
-                </label>
-                <label class="field">
-                  <span class="field__label">Размерность векторов</span>
-                  <input v-model.number="embedDraft.dimensions" class="input" type="number" min="64" max="8192" step="64" />
-                  <span class="field__hint">Попадёт в <span class="mono">dimensions</span> запроса.</span>
-                </label>
+          <div v-if="embedProfiles.length" class="embed__list">
+            <div v-for="p in embedProfiles" :key="p.id" class="embed__row">
+              <div class="embed__who">
+                <strong>{{ p.name }}</strong>
+                <span class="muted mono">{{ p.model }} @ {{ hostOf(p.base_url) }}</span>
+                <span class="badge" :class="badgeFor(p).cls">{{ badgeFor(p).text }}</span>
+                <span v-if="p.embed_dimensions" class="badge">{{ p.embed_dimensions }} мерн.</span>
               </div>
               <div class="check">
-                <button class="btn btn--primary" type="button" disabled>Создать модель</button>
-                <span class="field__hint">Кнопка включится, когда бэкенд начнёт принимать выбранный протокол.</span>
+                <button class="btn" type="button" :disabled="results[p.id] === 'pending'" @click="check(p)">
+                  <span v-if="results[p.id] === 'pending'" class="check__spin" />
+                  <AppIcon v-else name="refresh" size="sm" />
+                  Проверить
+                </button>
+                <button v-if="toDelete !== p.id" class="btn btn--ghost" type="button" @click="toDelete = p.id">
+                  Удалить
+                </button>
+                <template v-else>
+                  <button class="btn btn--danger" type="button" @click="remove(p)">Точно удалить</button>
+                  <button class="btn btn--ghost" type="button" @click="toDelete = ''">Отмена</button>
+                </template>
               </div>
+              <transition name="fade-slide">
+                <p v-if="results[p.id] && results[p.id] !== 'pending'" class="check__msg" :class="testOk(p.id) ? 'is-ok' : 'is-bad'">
+                  <AppIcon :name="testOk(p.id) ? 'check' : 'alert'" size="sm" />
+                  {{ testText(p.id) }}
+                </p>
+              </transition>
+            </div>
+          </div>
+
+          <div class="types__pending">
+            <div class="grid">
+              <label class="field">
+                <span class="field__label">Название</span>
+                <input v-model="embedDraft.name" class="input" type="text" placeholder="Эмбеддинги шлюза" />
+              </label>
+              <label class="field">
+                <span class="field__label">Base URL</span>
+                <input v-model="embedDraft.baseUrl" class="input" type="url" spellcheck="false" placeholder="https://…/v1" />
+              </label>
+              <label class="field">
+                <span class="field__label">Модель</span>
+                <input v-model="embedDraft.model" class="input" type="text" spellcheck="false" placeholder="cifra48/embedding" />
+              </label>
+              <label class="field">
+                <span class="field__label">API key</span>
+                <input v-model="embedDraft.apiKey" class="input" type="password" spellcheck="false" autocomplete="off" />
+              </label>
+            </div>
+            <div class="params">
+              <label class="field">
+                <span class="field__label">Протокол эмбеддингов</span>
+                <select v-model="embedDraft.protocol" class="select">
+                  <option value="gateway">формат шлюза (не OpenAI)</option>
+                  <option value="openai">OpenAI-совместимый</option>
+                </select>
+                <span class="field__hint">
+                  Формат шлюза добавляет в запрос <span class="mono">task</span>; OpenAI понимает только
+                  <span class="mono">dimensions</span>.
+                </span>
+              </label>
+              <template v-if="embedDraft.protocol === 'gateway'">
+                <label class="field">
+                  <span class="field__label">Поле task для вопроса</span>
+                  <input v-model="embedDraft.queryTask" class="input" type="text" spellcheck="false" placeholder="retrieval.query" />
+                  <span class="field__hint">Уйдёт в <span class="mono">embed_query_task</span>.</span>
+                </label>
+                <label class="field">
+                  <span class="field__label">Поле task для фрагментов</span>
+                  <input v-model="embedDraft.passageTask" class="input" type="text" spellcheck="false" placeholder="retrieval.passage" />
+                  <span class="field__hint">Уйдёт в <span class="mono">embed_passage_task</span>.</span>
+                </label>
+              </template>
+              <label class="field">
+                <span class="field__label">Размерность векторов</span>
+                <input v-model.number="embedDraft.dimensions" class="input" type="number" min="64" max="8192" step="64" />
+                <span class="field__hint">Попадёт в <span class="mono">embed_dimensions</span> запроса.</span>
+              </label>
+            </div>
+            <div class="check">
+              <button class="btn btn--primary" type="button" :disabled="!canCreateEmbed" @click="createEmbed">
+                {{ creatingEmbed ? 'Создаём…' : 'Создать модель' }}
+              </button>
+              <span class="field__hint">Первая модель сама займёт роль <span class="mono">embed</span>.</span>
             </div>
           </div>
         </AccordionItem>
@@ -644,11 +728,11 @@ onMounted(load)
             <select
               class="select"
               :value="roles.rerank ?? ''"
-              :disabled="loading || !profiles.length"
-              @change="assignRole('rerank', ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">не назначено</option>
-              <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
+              :disabled="loading || !chatProfiles.length"
+                @change="assignRole('rerank', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">не назначено</option>
+                <option v-for="p in chatProfiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
             </select>
             <span class="field__hint">
               <template v-if="roles.rerank">привязано: {{ boundName('rerank') }}</template>
@@ -855,10 +939,25 @@ onMounted(load)
   border-top: 1px dashed var(--border);
 }
 
-.types__pending-fields {
+.embed__list {
   display: grid;
-  gap: var(--s-4);
-  opacity: 0.65;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.embed__row {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 10px);
+}
+
+.embed__who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
 }
 
 .models__types {
