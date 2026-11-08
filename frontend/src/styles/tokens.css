@@ -1,0 +1,114 @@
+/* Дизайн-токены: единая палитра, радиусы, тени, темп анимаций.
+   Тёмная тема переключается атрибутом data-theme на <html>. */
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f4f6fb;
+  --bg-glow-1: rgba(37, 99, 235, 0.1);
+  --bg-glow-2: rgba(16, 185, 129, 0.08);
+
+  --surface: #ffffff;
+  --surface-2: #f8fafd;
+  --surface-3: #eef2f9;
+  --surface-inset: #f2f5fa;
+
+  --border: #e0e6f0;
+  --border-strong: #c8d2e4;
+
+  --text: #101728;
+  --text-muted: #5a667e;
+  --text-faint: #8a94aa;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4fd0;
+  --accent-press: #1a45b8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --accent-line: rgba(37, 99, 235, 0.28);
+  --on-accent: #ffffff;
+
+  --ok: #0f8a5f;
+  --ok-soft: rgba(15, 138, 95, 0.12);
+  --warn: #b06f0a;
+  --warn-soft: rgba(176, 111, 10, 0.14);
+  --bad: #cf2f43;
+  --bad-soft: rgba(207, 47, 67, 0.12);
+  --info: #4f46e5;
+  --info-soft: rgba(79, 70, 229, 0.12);
+
+  --shadow-1: 0 1px 2px rgba(16, 23, 40, 0.06), 0 1px 3px rgba(16, 23, 40, 0.04);
+  --shadow-2: 0 4px 12px rgba(16, 23, 40, 0.07), 0 2px 4px rgba(16, 23, 40, 0.04);
+  --shadow-3: 0 18px 48px rgba(16, 23, 40, 0.16), 0 4px 12px rgba(16, 23, 40, 0.08);
+  --ring: 0 0 0 3px var(--accent-soft);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0d1117;
+  --bg-glow-1: rgba(96, 148, 255, 0.12);
+  --bg-glow-2: rgba(16, 185, 129, 0.1);
+
+  --surface: #151b25;
+  --surface-2: #1a2130;
+  --surface-3: #212a3b;
+  --surface-inset: #101722;
+
+  --border: #27313f;
+  --border-strong: #3a4657;
+
+  --text: #e7ecf5;
+  --text-muted: #9aa6bb;
+  --text-faint: #6e7a91;
+
+  --accent: #6f9cff;
+  --accent-hover: #86adff;
+  --accent-press: #5c88ea;
+  --accent-soft: rgba(111, 156, 255, 0.16);
+  --accent-line: rgba(111, 156, 255, 0.36);
+  --on-accent: #0b1220;
+
+  --ok: #3ddc97;
+  --ok-soft: rgba(61, 220, 151, 0.14);
+  --warn: #f0b429;
+  --warn-soft: rgba(240, 180, 41, 0.15);
+  --bad: #ff6b7d;
+  --bad-soft: rgba(255, 107, 125, 0.15);
+  --info: #a5a1ff;
+  --info-soft: rgba(165, 161, 255, 0.15);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-pill: 999px;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+
+  --ease: cubic-bezier(0.22, 0.68, 0.24, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 130ms;
+  --t: 220ms;
+  --t-slow: 420ms;
+
+  --header-h: 60px;
+  --page-max: 1160px;
+}
