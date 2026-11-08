@@ -655,3 +655,23 @@ def test_map_hides_old_redaction_and_reports_coverage(monkeypatch):
     reduce_prompt = seen[-1]
     assert "24.11.2026" not in reduce_prompt.split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
     assert "Прочитаны ВСЕ фрагменты" in reduce_prompt
+
+
+def test_map_replaces_hidden_old_clause_with_amendment(monkeypatch):
+    seen = []
+
+    async def fake_chat(profile, messages, **kw):
+        text = messages[-1]["content"]
+        seen.append(text)
+        if "ФРАГМЕНТ одного документа" in text:
+            return json.dumps({"quotes": ["2.6. Участник должен иметь опыт исполнения не менее 2 контрактов стоимостью от 300 000,00 руб."]},
+                              ensure_ascii=False)
+        return json.dumps({"status": "ответ", "answer": "не требуется", "quote": "Пункт 2.6 извещения признать утратившим силу",
+                           "file": "05_izmeneniya_izveshcheniya.txt"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    ctx = Context(models=CTX.models, options={"quote_first": True, "map_extract": True, "llm_critic": False})
+    asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Сколько контрактов нужно для опыта?"),
+                                       NUM_AMEND_DOCS, ctx))
+    shown = seen[-1].split("Проверенные фрагменты:")[1].split("Вопрос:")[0]
+    assert "признан утратившим силу" in shown and "300 000" not in shown

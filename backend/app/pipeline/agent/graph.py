@@ -17,7 +17,7 @@
   quote_first: bool       сначала модель выписывает фрагменты, код их проверяет и размечает, ответ — только по ним
   votes: int              голосование: сколько ответов сравнить на первой попытке (1 — выключено)
   map_extract: bool       с quote_first: модель читает закупку фрагментами (map), ответ — по проверенным выпискам (reduce)
-  map_chunk_chars: int    размер фрагмента для map (2500); map_max_chunks — сколько фрагментов читать (8)
+  map_chunk_chars: int    размер фрагмента для map (4000); map_max_chunks — больше стольких фрагментов отбирает поиск (30)
   strategy: str           "full" (по умолчанию) | "map" (= quote_first + map_extract); можно задать в профиле модели
 """
 import asyncio
@@ -147,9 +147,15 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
         tags = []
         if file in by_file and is_amendment_doc(by_file[file]):
             tags.append("[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]")
-        if superseded_by(text, file, amendments):
-            if map_mode:          # в map-reduce старую редакцию вообще не показываем: слабая модель хватается за неё
+        old_by = superseded_by(text, file, amendments)
+        if old_by:
+            if map_mode:          # в map-reduce старую редакцию не показываем, а подставляем то, что её заменило
                 stale += 1
+                repl = (f"Пункт {old_by.clause} признан утратившим силу" if old_by.repealed else old_by.new_text)
+                if repl and repl.lower() not in seen:
+                    seen.add(repl.lower())
+                    lines.append(f"- ({old_by.amend_file}) [ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ, заменяет старую редакцию] «{repl}»")
+                    kept += 1
                 continue
             tags.append("[СТАРАЯ РЕДАКЦИЯ]")
         lines.append(f"- ({file}) {' '.join(tags)} «{text}»")
@@ -178,7 +184,7 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
     from app.pipeline.agent.context import redact
     from app.pipeline.agent.critics import is_amendment_doc
 
-    size, overlap = int(_opt(ctx, "map_chunk_chars", 2500)), 200
+    size, overlap = int(_opt(ctx, "map_chunk_chars", 4000)), 200
     chunks: list[tuple[Document, str]] = []
     for d in docs:
         if d.is_empty:
@@ -193,7 +199,8 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
             if end >= len(d.text):
                 break
             pos = max(end - overlap, pos + 1)
-    limit = int(_opt(ctx, "map_max_chunks", 8))
+    # читаем всё: только тогда «нет в документах» обоснован; поиск отбирает фрагменты лишь для огромных документов
+    limit = int(_opt(ctx, "map_max_chunks", 30))
     read_all = len(chunks) <= limit
     if not read_all:
         must = [c for c in chunks if is_amendment_doc(c[0])]
