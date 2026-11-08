@@ -68,7 +68,7 @@ const bare = computed(() => route.meta.bare === true)
   padding: 6px;
   background: color-mix(in srgb, var(--surface) 82%, transparent);
   border: 1px solid var(--border);
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
   box-shadow: var(--shadow-2);
   backdrop-filter: blur(10px);
   animation: dock-in var(--t-slow) var(--ease-out) both 120ms;
@@ -82,6 +82,11 @@ const bare = computed(() => route.meta.bare === true)
 .dock__ask {
   border: none;
   padding-block: 7px;
+  border-radius: var(--r-xs);
+}
+
+.dock .icon-btn {
+  border-radius: var(--r-xs);
 }
 
 .dock__ask:hover {
@@ -93,6 +98,9 @@ const bare = computed(() => route.meta.bare === true)
 .dock--gear {
   bottom: var(--s-4);
   inset-inline-start: var(--s-4);
+  gap: 0;
+  padding: 0 8px;
+  height: 36px;
   color: var(--text-muted);
   text-decoration: none;
   transition: color var(--t) var(--ease), border-color var(--t) var(--ease);
@@ -118,7 +126,7 @@ const bare = computed(() => route.meta.bare === true)
 .dock--gear:focus-visible .dock__gear-label {
   max-width: 120px;
   opacity: 1;
-  margin-inline-start: var(--s-1);
+  margin-inline-start: var(--s-2);
 }
 
 .dock--gear .icon {

@@ -5,16 +5,20 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useTheme } from '@/composables/useTheme'
 import { alpha, applyChartDefaults, palette } from '@/utils/chartTheme'
 
-const props = withDefaults(defineProps<{ labels: string[]; before: number[]; after: number[]; hidden?: string[] }>(), {
-  hidden: () => [],
-})
+const props = withDefaults(
+  defineProps<{
+    labels: string[]
+    before: number[]
+    after: number[]
+    /** Подписи в легенде внутри холста: ['было · 8.5', 'стало · 84.5']. */
+    legendLabels?: string[]
+  }>(),
+  { legendLabels: () => [] },
+)
 
 const host = ref<HTMLCanvasElement | null>(null)
 const { theme } = useTheme()
 let chart: Chart | null = null
-
-const BEFORE = 'before'
-const AFTER = 'after'
 
 function label(v: unknown): string {
   const n = Number(v)
@@ -104,7 +108,30 @@ function build() {
       interaction: { mode: 'index', intersect: false },
       animation: { duration: 900, easing: 'easeOutQuart' },
       plugins: {
-        legend: { display: false },
+        legend: {
+          position: 'top',
+          align: 'end',
+          labels: {
+            usePointStyle: true,
+            pointStyleWidth: 30,
+            boxHeight: 10,
+            padding: 16,
+            color: p.text,
+            font: { size: 13, weight: 600 },
+            generateLabels: (c) =>
+              c.data.datasets.map((ds, i) => ({
+                text: props.legendLabels[i] ?? String(ds.label ?? ''),
+                hidden: !c.isDatasetVisible(i),
+                datasetIndex: i,
+                pointStyle: 'line',
+                strokeStyle: ds.borderColor as string,
+                fillStyle: ds.borderColor as string,
+                lineWidth: 2.5,
+                lineDash: i === 0 ? [5, 4] : [],
+                fontColor: p.text,
+              })),
+          },
+        },
         tooltip: {
           callbacks: { label: (item) => ` ${item.dataset.label}: ${label(item.parsed.y)} из 100` },
         },
@@ -129,8 +156,6 @@ function build() {
   }
 
   chart = new Chart(host.value, config)
-  props.hidden.forEach((id) => chart?.setDatasetVisibility(id === AFTER ? 1 : 0, false))
-  chart.update('none')
 }
 
 onMounted(() => {
@@ -140,17 +165,9 @@ onMounted(() => {
 
 onUnmounted(() => chart?.destroy())
 
-watch([theme, () => props.before, () => props.after], () => build(), { deep: true })
-
-watch(
-  () => props.hidden,
-  () => {
-    if (!chart) return
-    chart.setDatasetVisibility(0, !props.hidden.includes(BEFORE))
-    chart.setDatasetVisibility(1, !props.hidden.includes(AFTER))
-    chart.update()
-  },
-)
+watch([theme, () => props.before, () => props.after, () => props.legendLabels], () => build(), {
+  deep: true,
+})
 </script>
 
 <template>

@@ -69,14 +69,6 @@ export interface RunMeta {
   progress?: { done: number; total: number; status: string }
 }
 
-export interface LegendItem {
-  id: string
-  label: string
-  kind: 'line-dashed' | 'line-solid' | 'swatch'
-  color: string
-  value?: string | number
-}
-
 export interface TypeBreakdown {
   /** тип вопроса -> вердикт -> количество */
   [type: string]: Record<Verdict, number>

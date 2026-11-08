@@ -15,59 +15,68 @@ const props = withDefaults(
 
 const model = defineModel<number>({ required: true })
 
+/**
+ * Пишем только из text: одно направление потока, без обработчиков blur —
+ * на number-инпуте они ведут себя непредсказуемо. Значение вне диапазона
+ * подсвечиваем, а в модель уходит уже ограниченное число.
+ */
 const text = ref(String(model.value))
-watch(model, (v) => {
-  if (parse(text.value) !== v) text.value = String(v)
-})
+let lastSet = model.value
 
-function parse(raw: string): number {
-  return Number.parseFloat(raw.replace(',', '.'))
+function parse(raw: string | number): number {
+  return typeof raw === 'number' ? raw : Number.parseFloat(raw.replace(',', '.'))
 }
 
 function clamp(n: number): number {
   if (!Number.isFinite(n)) return props.min
-  const fixed = Math.round(n * 1000) / 1000
-  return Math.min(props.max, Math.max(props.min, fixed))
+  return Math.min(props.max, Math.max(props.min, Math.round(n * 1000) / 1000))
 }
 
-function commit() {
-  model.value = clamp(parse(text.value))
-  text.value = String(model.value)
-}
+const parsed = computed(() => parse(text.value))
+const invalid = computed(() => !Number.isFinite(parsed.value) || parsed.value < props.min || parsed.value > props.max)
+const atMin = computed(() => parsed.value <= props.min)
+const atMax = computed(() => parsed.value >= props.max)
+
+watch(text, () => {
+  if (!Number.isFinite(parsed.value)) return
+  lastSet = clamp(parsed.value)
+  model.value = lastSet
+})
+
+watch(model, (v) => {
+  if (v === lastSet) return
+  lastSet = v
+  text.value = String(v)
+})
 
 function bump(dir: number) {
-  model.value = clamp(parse(text.value) + dir * props.step)
-  text.value = String(model.value)
+  text.value = String(clamp((Number.isFinite(parsed.value) ? parsed.value : lastSet) + dir * props.step))
 }
-
-const atMin = computed(() => parse(text.value) <= props.min)
-const atMax = computed(() => parse(text.value) >= props.max)
 </script>
 
 <template>
   <label class="num">
     <span class="field__label">{{ label }}</span>
-    <span class="num__control">
+    <span class="num__control" :class="{ 'num__control--bad': invalid }">
       <button class="num__step" type="button" :disabled="atMin" aria-label="Уменьшить" @click="bump(-1)">
         &minus;
       </button>
       <input
         v-model="text"
         class="num__input"
-        type="number"
+        type="text"
         inputmode="decimal"
-        :min="min"
-        :max="max"
-        :step="step"
-        @blur="commit"
-        @keydown.enter.prevent="commit"
+        autocomplete="off"
+        :aria-invalid="invalid"
       />
       <span v-if="unit" class="num__unit">{{ unit }}</span>
       <button class="num__step" type="button" :disabled="atMax" aria-label="Увеличить" @click="bump(1)">
         +
       </button>
     </span>
-    <span v-if="hint" class="field__hint">{{ hint }}</span>
+    <span class="field__hint" :class="{ 'field__hint--bad': invalid }">
+      {{ invalid ? `Допустимо от ${min} до ${max}` : hint }}
+    </span>
   </label>
 </template>
 
@@ -99,6 +108,12 @@ const atMax = computed(() => parse(text.value) >= props.max)
   border-color: var(--accent);
   background: var(--surface);
   box-shadow: var(--ring);
+}
+
+.num__control--bad,
+.num__control--bad:focus-within {
+  border-color: var(--bad);
+  box-shadow: 0 0 0 3px var(--bad-soft);
 }
 
 .num__input {
@@ -157,5 +172,9 @@ const atMax = computed(() => parse(text.value) >= props.max)
 .num__step:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.field__hint--bad {
+  color: var(--bad);
 }
 </style>

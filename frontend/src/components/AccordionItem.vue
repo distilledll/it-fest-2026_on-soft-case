@@ -12,7 +12,7 @@ defineProps<{
   badgeCls?: string
 }>()
 
-const open = defineModel<boolean>({ default: false })
+const open = defineModel<boolean>('open', { default: false })
 
 const cls = computed(() => ['acc', open.value ? 'acc--open' : ''])
 </script>

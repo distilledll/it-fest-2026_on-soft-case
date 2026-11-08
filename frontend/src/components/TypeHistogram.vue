@@ -7,8 +7,13 @@ import { applyChartDefaults, palette } from '@/utils/chartTheme'
 import type { Verdict } from '@/types'
 
 const props = withDefaults(
-  defineProps<{ labels: string[]; counts: Record<Verdict, number[]>; hidden?: string[] }>(),
-  { hidden: () => [] },
+  defineProps<{
+    labels: string[]
+    counts: Record<Verdict, number[]>
+    /** Подписи в легенде внутри холста: ['верно · 61', ...]. */
+    legendLabels?: string[]
+  }>(),
+  { legendLabels: () => [] },
 )
 
 const host = ref<HTMLCanvasElement | null>(null)
@@ -78,7 +83,29 @@ function build() {
       layout: { padding: { top: 18 } },
       animation: { duration: 800, easing: 'easeOutQuart' },
       plugins: {
-        legend: { display: false },
+        legend: {
+          position: 'top',
+          align: 'end',
+          labels: {
+            usePointStyle: true,
+            pointStyleWidth: 12,
+            boxHeight: 12,
+            padding: 16,
+            color: p.text,
+            font: { size: 13, weight: 600 },
+            generateLabels: (c) =>
+              c.data.datasets.map((ds, i) => ({
+                text: props.legendLabels[i] ?? String(ds.label ?? ''),
+                hidden: !c.isDatasetVisible(i),
+                datasetIndex: i,
+                pointStyle: 'rectRounded',
+                strokeStyle: color[SERIES[i]!.tone],
+                fillStyle: color[SERIES[i]!.tone],
+                lineWidth: 0,
+                fontColor: p.text,
+              })),
+          },
+        },
         tooltip: { callbacks: { label: (item) => ` ${item.dataset.label}: ${item.parsed.y}` } },
       },
       scales: {
@@ -101,8 +128,6 @@ function build() {
   }
 
   chart = new Chart(host.value, config)
-  SERIES.forEach((s, i) => chart?.setDatasetVisibility(i, !props.hidden.includes(s.key)))
-  chart.update('none')
 }
 
 onMounted(() => {
@@ -111,16 +136,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => chart?.destroy())
-watch([theme, () => props.counts], () => build(), { deep: true })
-
-watch(
-  () => props.hidden,
-  () => {
-    if (!chart) return
-    SERIES.forEach((s, i) => chart?.setDatasetVisibility(i, !props.hidden.includes(s.key)))
-    chart.update()
-  },
-)
+watch([theme, () => props.counts, () => props.legendLabels], () => build(), { deep: true })
 </script>
 
 <template>

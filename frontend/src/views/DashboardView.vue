@@ -3,61 +3,17 @@ import { computed, onMounted, ref } from 'vue'
 
 import AppIcon from '@/components/AppIcon.vue'
 import BeforeAfterChart from '@/components/BeforeAfterChart.vue'
-import ChartLegend from '@/components/ChartLegend.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
 import { useCountUp } from '@/composables/useCountUp'
-import { useTheme } from '@/composables/useTheme'
 import { QUESTION_TYPES, indexByType, mockAfter, mockBefore, shortType, total } from '@/api/mock'
-import type { LegendItem } from '@/types'
-import { palette } from '@/utils/chartTheme'
 import { formatIndex, signed } from '@/utils/presentation'
 
 const before = mockBefore
 const after = mockAfter
 
-const { theme } = useTheme()
-
 const labels = QUESTION_TYPES.map(shortType)
 const lineBefore = indexByType(before.breakdown)
 const lineAfter = indexByType(after.breakdown)
-
-const hiddenLine = ref<string[]>([])
-const hiddenBars = ref<string[]>([])
-
-/** Цвета легенды берём из тех же токенов, что и графики, и пересчитываем при смене темы. */
-const colors = computed(() => {
-  void theme.value
-  return palette()
-})
-
-const lineLegend = computed<LegendItem[]>(() => [
-  {
-    id: 'before',
-    label: 'было',
-    kind: 'line-dashed',
-    color: colors.value.muted,
-    value: formatIndex(before.score.index),
-  },
-  {
-    id: 'after',
-    label: 'стало',
-    kind: 'line-solid',
-    color: colors.value.accent,
-    value: formatIndex(after.score.index),
-  },
-])
-
-const barLegend = computed<LegendItem[]>(() => [
-  { id: 'верно', label: 'верно', kind: 'swatch', color: colors.value.ok, value: totals.верно },
-  {
-    id: 'осторожно',
-    label: 'осторожно',
-    kind: 'swatch',
-    color: colors.value.warn,
-    value: totals.осторожно,
-  },
-  { id: 'обман', label: 'обман', kind: 'swatch', color: colors.value.bad, value: totals.обман },
-])
 
 const totals = total(after.breakdown)
 const all = totals.верно + totals.осторожно + totals.обман
@@ -72,6 +28,17 @@ const histogram = {
   осторожно: QUESTION_TYPES.map((t) => after.breakdown[t]?.осторожно ?? 0),
   обман: QUESTION_TYPES.map((t) => after.breakdown[t]?.обман ?? 0),
 }
+
+const lineLegend = [
+  `было · ${formatIndex(before.score.index)}`,
+  `стало · ${formatIndex(after.score.index)}`,
+]
+
+const barLegend = [
+  `верно · ${totals.верно}`,
+  `осторожно · ${totals.осторожно}`,
+  `обман · ${totals.обман}`,
+]
 
 const indexValue = useCountUp(() => after.score.index)
 const delta = Math.round((after.score.index - before.score.index) * 10) / 10
@@ -118,20 +85,6 @@ const verdictRows = computed(() => [
       <div>
         <p class="eyebrow">Замер «было / стало»</p>
         <h1>Дашборд</h1>
-        <p class="lede">
-          Одна и та же модель, {{ after.score.n }} вопросов. Меняется только то, как система ищет
-          ответ и перепроверяет себя.
-        </p>
-      </div>
-      <div class="runs">
-        <span class="runs__chip">
-          <i class="dot dot--before" />
-          было · {{ before.meta.label }}
-        </span>
-        <span class="runs__chip">
-          <i class="dot dot--after" />
-          стало · {{ after.meta.label }}
-        </span>
       </div>
     </header>
 
@@ -184,36 +137,26 @@ const verdictRows = computed(() => [
 
       <!-- 2. Линейный график было/стало -->
       <section class="card panel reveal reveal-2" aria-label="Индекс доверия по типам вопросов">
-        <div class="panel__head">
-          <div class="panel__titles">
-            <h2>Индекс доверия по типам вопросов</h2>
-            <p class="muted chart-sub">
-              Пунктир — как отвечала модель «как есть». Сплошная линия — после проверок.
-            </p>
-          </div>
-          <ChartLegend v-model:hidden="hiddenLine" :items="lineLegend" />
-        </div>
+        <h2>Индекс доверия по типам вопросов</h2>
+        <p class="muted chart-sub">
+          Пунктир — как отвечала модель «как есть». Сплошная линия — после проверок.
+        </p>
         <BeforeAfterChart
           :labels="labels"
           :before="lineBefore"
           :after="lineAfter"
-          :hidden="hiddenLine"
+          :legend-labels="lineLegend"
         />
       </section>
 
       <!-- 3. Гистограмма по типам вопросов -->
       <section class="card panel reveal reveal-3" aria-label="Вердикты по типам вопросов">
-        <div class="panel__head">
-          <div class="panel__titles">
-            <h2>Где именно обманывал ИИ</h2>
-            <p class="muted chart-sub">
-              Столбик — все вопросы типа, цифра сверху — их количество. Красный сегмент там, где
-              система была уверена и неправа.
-            </p>
-          </div>
-          <ChartLegend v-model:hidden="hiddenBars" :items="barLegend" />
-        </div>
-        <TypeHistogram :labels="labels" :counts="histogram" :hidden="hiddenBars" />
+        <h2>Где именно обманывал ИИ</h2>
+        <p class="muted chart-sub">
+          Столбик — все вопросы типа, цифра сверху — их количество. Красный сегмент там, где система
+          была уверена и неправа.
+        </p>
+        <TypeHistogram :labels="labels" :counts="histogram" :legend-labels="barLegend" />
       </section>
     </div>
 
@@ -237,34 +180,12 @@ const verdictRows = computed(() => [
 </template>
 
 <style scoped>
-.runs {
-  display: grid;
-  gap: var(--s-2);
-}
-
-.runs__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-2);
-  font-size: 13px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
 .dot {
   width: 8px;
   height: 8px;
   flex: none;
   border-radius: 50%;
   background: var(--text-faint);
-}
-
-.dot--before {
-  background: var(--text-faint);
-}
-
-.dot--after {
-  background: var(--accent);
 }
 
 .is-ok {
@@ -358,16 +279,25 @@ const verdictRows = computed(() => [
 
 .index__meta {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--s-2);
+  grid-template-columns: repeat(3, auto);
+  justify-content: space-between;
+  gap: var(--s-2) var(--s-3);
   margin: auto 0 0;
   padding-top: var(--s-4);
   border-top: 1px solid var(--border);
 }
 
+/* Метка растягивается по высоте, поэтому значения всегда на одной линии. */
+.index__meta > div {
+  display: flex;
+  flex-direction: column;
+}
+
 .index__meta dt {
+  flex: 1;
   font-size: 11.5px;
   color: var(--text-faint);
+  white-space: nowrap;
 }
 
 .index__meta dd {
@@ -376,22 +306,14 @@ const verdictRows = computed(() => [
   font-variant-numeric: tabular-nums;
 }
 
-.panel__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--s-2) var(--s-5);
-  margin-bottom: var(--s-4);
-}
-
-.panel__titles {
-  min-width: min(280px, 100%);
+.panel h2 {
+  margin-bottom: 2px;
 }
 
 .chart-sub {
   font-size: 13.5px;
   margin-top: 2px;
+  margin-bottom: var(--s-4);
   max-width: 62ch;
 }
 
