@@ -645,19 +645,7 @@ onUnmounted(() => controller?.abort())
 }
 
 @media (min-width: 760px) {
-  .visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  border: 0;
-  padding: 0;
-  clip: rect(0 0 0 0);
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.lib__row {
+  .lib__row {
     grid-template-columns: 1fr auto auto;
   }
 }

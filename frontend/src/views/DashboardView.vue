@@ -113,7 +113,14 @@ watch(datasetId, (id) => {
   if (info && info.id !== active.value?.id) setActive(info)
 })
 
-watch([beforeId, afterId], async ([b, a]) => {
+/* Оценка пары: меняется, когда к набору загрузили эталон и прогоны пересчитались — сравнение надо перезапросить. */
+const scoreSig = computed(() => {
+  const s = (id: string) => finished.value.find((r) => r.run_id === id)?.score?.index ?? '-'
+  return `${s(beforeId.value)}|${s(afterId.value)}`
+})
+
+// immediate: при возврате на дашборд прогоны уже загружены и пара не меняется — сравнение нужно сразу
+watch([beforeId, afterId, scoreSig], async ([b, a]) => {
   pairError.value = ''
   if (!b || !a || b === a) {
     pair.value = null
@@ -128,7 +135,7 @@ watch([beforeId, afterId], async ([b, a]) => {
     pair.value = null
     pairError.value = e instanceof ApiError ? e.message : 'не удалось получить сравнение прогонов'
   }
-})
+}, { immediate: true })
 
 const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : viewOf(releaseBefore)))
 const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : viewOf(releaseAfter)))
