@@ -59,8 +59,8 @@ async function start(body: RunStart): Promise<string> {
 
 /* ------------------------------------------------- лесенка «было → стало» */
 
-/** Короткая лесенка: «было» (baseline) и «стало» (полный агент) — руками пайплайны выбирать не надо. */
-export const BOTH_STEPS = ['baseline', 'full'] as const
+/** Короткая лесенка: «было» (baseline) и «стало» (hybrid — то, что сдаём) — руками пайплайны выбирать не надо. */
+export const BOTH_STEPS = ['baseline', 'hybrid'] as const
 
 const ladderId = ref('')
 let ladderDeadline = 0
@@ -79,7 +79,7 @@ function settleLadder(): void {
   if (allTerminal || neverBorn) ladderId.value = ''
 }
 
-/** «Было → стало» одним запуском: baseline и полный агент идут по очереди на одном датасете. */
+/** «Было → стало» одним запуском: baseline и hybrid (агент + резервный проход) идут по очереди на одном датасете. */
 async function startBoth(dataset: string): Promise<string> {
   const { ladder_id } = await startLadder({ dataset, steps: [...BOTH_STEPS] })
   ladderId.value = ladder_id

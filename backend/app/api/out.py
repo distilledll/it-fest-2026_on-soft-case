@@ -265,3 +265,72 @@ class LadderOut(Out):
 
 class LadderStarted(Out):
     ladder_id: str
+
+
+# ---------------------------------------------------------------- эталон после прогона и сводка проверок
+
+class RescoredRun(Out):
+    run_id: str
+    label: str = ""
+    pipeline: str | None = None
+    ladder: LadderRef | None = None
+    score: Score | None = None
+
+
+class GoldOut(Out):
+    dataset: DatasetInfo
+    gold: int = Field(description="сколько вопросов в эталоне")
+    questions: int = Field(description="сколько вопросов в наборе")
+    missing: list[str] = Field(description="вопросы набора без эталона — check.py их не оценивает")
+    rescored: list[RescoredRun] = Field(description="завершённые прогоны набора, пересчитанные с эталоном")
+
+
+class InsightCheck(Out):
+    check: str = Field(examples=["conflict"])
+    title: str = Field(examples=["Расхождение"])
+    what: str = Field("", examples=["расхождение между файлами"])
+    message: str = Field("", description="что именно сказала проверка (дословно из trace)")
+
+
+class InsightEvent(Out):
+    id: str
+    package: str = ""
+    question: str = ""
+    checks: list[InsightCheck] = Field(description="какие проверки сработали на этом вопросе, по порядку")
+    draft: str = Field("", description="первый ответ модели, до проверок: «ответ «60»»")
+    final: AnswerFields
+    outcome: str = Field(description="fixed — исправлено | refused — «не знаю» вместо неподтверждённого | kept — подтверждено")
+    outcome_title: str
+    summary: str = Field(description="одна фраза для ленты: «Расхождение: … Итог — исправлено.»")
+    verdict: dict | None = Field(None, description="вердикт check.py {verdict, why}, если есть эталон")
+
+
+class InsightCheckStats(Out):
+    check: str
+    title: str
+    what: str = ""
+    fired: int
+    fixed: int = 0
+    refused: int = 0
+    kept: int = 0
+
+
+class InsightsOut(Out):
+    run_id: str
+    label: str = ""
+    pipeline: str | None = None
+    dataset: str
+    has_gold: bool
+    n: int
+    statuses: dict[str, int] = Field(description="сколько ответов каждого статуса")
+    with_checks: int = Field(description="вопросов, где хоть одна проверка что-то заметила")
+    clean: int = Field(description="вопросов, где проверки прошли с первого раза")
+    outcomes: dict[str, int] = Field(description="{fixed, refused, kept}")
+    checks: list[InsightCheckStats] = Field(description="по каждой проверке: сколько раз сработала и чем кончилось")
+    events: list[InsightEvent]
+
+
+class StrategyInfo(Out):
+    id: str = Field(examples=["map"])
+    title: str = Field(examples=["Map-reduce всегда"])
+    description: str

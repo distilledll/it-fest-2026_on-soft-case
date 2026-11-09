@@ -37,6 +37,18 @@ STRATEGIES = {
 }
 
 
+# Подписи режимов для переключателя на фронте (GET /api/strategies).
+STRATEGY_INFO = [
+    {"id": "auto", "title": "Авто (по умолчанию)",
+     "description": "Закупка влезает в окно модели — читается целиком; не влезает — map-reduce по фрагментам."},
+    {"id": "map", "title": "Map-reduce всегда",
+     "description": "Модель читает закупку фрагментами, выписывает цитаты, код их проверяет; ответ — по выпискам. "
+                    "Точнее на больших закупках, но запросов в 3–5 раз больше."},
+    {"id": "full", "title": "Без map-reduce",
+     "description": "Целиком или фрагменты поиска, без чтения по частям — для сравнения."},
+]
+
+
 def make_context(roles: dict[str, str] | None = None, options: dict | None = None) -> Context:
     """Опции = стратегия (из профиля модели или запроса) + agent_options профиля роли answer + опции запроса."""
     models = llm.resolve_roles(roles)
@@ -209,12 +221,17 @@ def _write_meta(out: Path, meta: dict) -> None:
 
 
 def write_answers_csv(answers: list[Answer], path: Path) -> None:
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    """answers.csv в формате кейса: UTF-8, разделитель «;», колонки id;status;answer;quote;file.
+    BOM — чтобы Excel открыл кириллицу правильно (check.py его срезает). У «нет в документах» и «не знаю»
+    answer/quote/file пустые, как в примере организатора, — даже в прогонах без guard."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
         w.writeheader()
         for a in answers:
             row = a.model_dump(include=set(FIELDS))
             row["status"] = a.status.value
+            if a.status in (Status.ABSENT, Status.UNKNOWN):
+                row.update(answer="", quote="", file="")
             # переносы строк в цитате ломают просмотр в Excel; check.py их всё равно нормализует
             w.writerow({k: re.sub(r"\s+", " ", str(v)).strip() for k, v in row.items()})
 
@@ -243,6 +260,32 @@ def _by_type(result_csv: Path) -> dict:
             t = out.setdefault(r["type"], {"верно": 0, "осторожно": 0, "обман": 0})
             t[r["verdict"]] = t.get(r["verdict"], 0) + 1
     return out
+
+
+def rescore_run(run_id: str) -> dict:
+    """Пересчитать оценку завершённого прогона — например, после того как к набору загрузили эталон."""
+    out = settings.runs_dir / run_id
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    if meta.get("status") != "done":
+        raise ValueError("прогон ещё не завершён")
+    data_dir = datasets.path_of(meta["dataset"])
+    if not (data_dir / "answers_public.json").exists():
+        raise ValueError("у набора нет эталона: загрузите answers_public.json")
+    meta["score"] = score(out / "answers.csv", data_dir, out / "result.csv")
+    meta["rescored_at"] = datetime.now().isoformat(timespec="seconds")
+    _write_meta(out, meta)
+    meta["score"].pop("report", None)
+    return meta
+
+
+def rescore_dataset(dataset_id: str) -> list[dict]:
+    """Все завершённые прогоны набора — в том числе шаги лесенок: графики «было/стало» строятся сразу."""
+    done = []
+    for p in sorted(settings.runs_dir.glob("*/meta.json")):
+        m = json.loads(p.read_text(encoding="utf-8"))
+        if m.get("dataset") == dataset_id and m.get("status") == "done":
+            done.append(rescore_run(p.parent.name))
+    return done
 
 
 def read_meta(run_id: str) -> dict:
@@ -277,13 +320,14 @@ LADDER = [
 
 
 async def run_ladder(dataset_id: str, roles: dict[str, str] | None = None, steps: list[str] | None = None,
-                     ladder_id: str | None = None) -> str:
-    """Все слои на одном датасете и одной модели — данные для графика вклада каждого слоя."""
+                     ladder_id: str | None = None, options: dict | None = None) -> str:
+    """Все слои на одном датасете и одной модели — данные для графика вклада каждого слоя.
+    options (напр. {"strategy": "map"}) идут во все шаги; то, что задаёт сам шаг лесенки, важнее."""
     ladder_id = ladder_id or new_run_id()
-    for order, (step, title, pipeline, options, use_guard) in enumerate(LADDER):
+    for order, (step, title, pipeline, step_options, use_guard) in enumerate(LADDER):
         if steps and step not in steps:
             continue
-        await run_set(dataset_id, pipeline, f"{title}", use_guard, roles, options,
+        await run_set(dataset_id, pipeline, f"{title}", use_guard, roles, {**(options or {}), **step_options},
                       ladder={"id": ladder_id, "step": step, "title": title, "order": order})
     return ladder_id
 

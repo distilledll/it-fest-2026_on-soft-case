@@ -39,7 +39,7 @@ app = FastAPI(
     ],
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-for r in (datasets.router, models.router, ask.router, runs.router, runs.ladders_router):
+for r in (datasets.router, models.router, ask.router, runs.router, runs.ladders_router, runs.strategies_router):
     app.include_router(r)
 
 

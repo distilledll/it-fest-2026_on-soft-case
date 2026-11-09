@@ -12,7 +12,7 @@ from app.api import out
 from app.config import settings
 from app.datasets import DatasetError
 from app.pipeline.base import PIPELINES
-from app.runs import LADDER, list_ladders, list_runs, new_run_id, read_meta, run_ladder, run_set
+from app.runs import LADDER, STRATEGIES, STRATEGY_INFO, list_ladders, list_runs, new_run_id, read_meta, run_ladder, run_set
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 _tasks: set[asyncio.Task] = set()
@@ -38,6 +38,8 @@ async def start_run(body: RunIn):
     pipeline = body.pipeline or settings.pipeline
     if pipeline not in PIPELINES:
         raise HTTPException(422, f"неизвестный пайплайн {pipeline}")
+    if body.options.get("strategy", "auto") not in STRATEGIES:
+        raise HTTPException(422, f"нет режима {body.options['strategy']}: {', '.join(STRATEGIES)}")
     run_id = new_run_id()
     t = asyncio.create_task(run_set(body.dataset, pipeline, body.label, body.guard, body.roles,
                                     body.options, run_id=run_id))
@@ -78,7 +80,7 @@ def run_detail(run_id: str):
 
 @router.get("/{run_id}/answers.csv", response_class=FileResponse, responses={200: {"description": "answers.csv для сдачи: UTF-8, разделитель `;`, колонки id;status;answer;quote;file", "content": {"text/csv": {"schema": {"type": "string"}}}}})
 def run_csv(run_id: str):
-    return FileResponse(_dir(run_id) / "answers.csv", media_type="text/csv", filename="answers.csv")
+    return FileResponse(_dir(run_id) / "answers.csv", media_type="text/csv; charset=utf-8", filename="answers.csv")
 
 
 @router.get("/{run_id}/caught", response_model=out.CaughtOut)
@@ -88,6 +90,26 @@ def run_caught(run_id: str):
     _dir(run_id)
     from app.analysis import analyze
     return analyze(run_id)
+
+
+@router.get("/{run_id}/insights", response_model=out.InsightsOut)
+def run_insights(run_id: str):
+    """Что заметили проверки — работает и без эталона (контрольный набор): какая проверка на каком вопросе
+    нашла несоответствие и чем кончилось. С эталоном к событиям добавляется вердикт check.py."""
+    _dir(run_id)
+    from app.insights import insights
+    return insights(run_id)
+
+
+@router.post("/{run_id}/rescore", response_model=out.RunMeta)
+def run_rescore(run_id: str):
+    """Пересчитать оценку прогона check.py (например, после загрузки эталона)."""
+    _dir(run_id)
+    from app.runs import rescore_run
+    try:
+        return rescore_run(run_id)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @router.post("/{run_id}/resume", status_code=202, response_model=out.RunStarted)
@@ -129,6 +151,7 @@ class LadderIn(BaseModel):
     dataset: str = "sample"
     roles: dict[str, str] | None = None
     steps: list[str] | None = None
+    options: dict = Field(default_factory=dict, description='во все шаги, напр. {"strategy": "map"}')
 
 
 @ladders_router.get("/steps", response_model=list[out.LadderStepDef])
@@ -144,8 +167,10 @@ async def start_ladder(body: LadderIn):
         raise HTTPException(404, str(e))
     if not info["has_questions"]:
         raise HTTPException(422, "в датасете нет questions.csv")
+    if body.options.get("strategy", "auto") not in STRATEGIES:
+        raise HTTPException(422, f"нет режима {body.options['strategy']}: {', '.join(STRATEGIES)}")
     lid = new_run_id()
-    t = asyncio.create_task(run_ladder(body.dataset, body.roles, body.steps, ladder_id=lid))
+    t = asyncio.create_task(run_ladder(body.dataset, body.roles, body.steps, ladder_id=lid, options=body.options))
     _tasks.add(t)
     t.add_done_callback(_tasks.discard)
     return {"ladder_id": lid}
@@ -169,3 +194,13 @@ def ladder_detail(ladder_id: str):
             r = analyze(st["run_id"])
             st["per_critic"], st["caught"], st["false_alarms"] = r["per_critic"], r["caught"], r["false_alarms"]
     return lad
+
+
+strategies_router = APIRouter(prefix="/api/strategies", tags=["runs"])
+
+
+@strategies_router.get("", response_model=list[out.StrategyInfo])
+def strategies():
+    """Режимы чтения закупки — для переключателя. Передаются как `options.strategy` в /api/runs, /api/ask,
+    /api/ladders или в `agent_options` профиля модели."""
+    return STRATEGY_INFO
