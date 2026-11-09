@@ -209,12 +209,17 @@ def _write_meta(out: Path, meta: dict) -> None:
 
 
 def write_answers_csv(answers: list[Answer], path: Path) -> None:
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    """answers.csv в формате кейса: UTF-8, разделитель «;», колонки id;status;answer;quote;file.
+    BOM — чтобы Excel открыл кириллицу правильно (check.py его срезает). У «нет в документах» и «не знаю»
+    answer/quote/file пустые, как в примере организатора, — даже в прогонах без guard."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
         w.writeheader()
         for a in answers:
             row = a.model_dump(include=set(FIELDS))
             row["status"] = a.status.value
+            if a.status in (Status.ABSENT, Status.UNKNOWN):
+                row.update(answer="", quote="", file="")
             # переносы строк в цитате ломают просмотр в Excel; check.py их всё равно нормализует
             w.writerow({k: re.sub(r"\s+", " ", str(v)).strip() for k, v in row.items()})
 
