@@ -34,12 +34,19 @@ class TraceStep(BaseModel):
     data: dict = Field(default_factory=dict)
 
 
+class Evidence(BaseModel):
+    file: str
+    quote: str
+    value: str = ""
+
+
 class Answer(BaseModel):
     id: str
     status: Status
     answer: str = ""
     quote: str = ""
     file: str = ""
+    evidence: list[Evidence] = Field(default_factory=list)
     trace: list[TraceStep] = Field(default_factory=list)
     llm_calls: int = 0
     elapsed_s: float = 0.0

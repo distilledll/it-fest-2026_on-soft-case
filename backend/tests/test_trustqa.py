@@ -209,6 +209,40 @@ class TrustTests(unittest.TestCase):
         engine, _ = self.engine(lambda req, _: dict(evidence=[], complete=True) if 'Независимо найди' in req[0]['content'] else missing)
         self.assertEqual(engine.answer(package, 'Какой цвет?')[0]['status'], 'нет в документах')
 
+    def test_rejected_real_source_cannot_turn_into_absence(self):
+        quote = 'Оплата поступает через 12 календарных дней.'
+        package = self.package({'a.txt': quote})
+        wrong = witness('a.txt', quote, '99')
+        missing = dict(status='нет в документах', answer='', quote='', file='', evidence=[])
+        def respond(req, call):
+            return dict(evidence=[wrong], complete=True) if 'Независимо найди' in req[0]['content'] else missing
+        engine, _ = self.engine(respond)
+        result, _ = engine.answer(package, 'Через сколько дней поступает оплата?')
+        self.assertEqual(result['status'], 'не знаю')
+
+    def test_answer_about_named_permit_can_exclude_other_permit(self):
+        first = 'Допуск «Рубин» не требуется.'
+        second = 'Допуск «Алмаз» обязателен.'
+        package = self.package({'a.txt': first, 'b.txt': second})
+        mine = witness('a.txt', first, 'нет', 'boolean')
+        other = witness('b.txt', second, 'да', 'boolean')
+        def respond(req, call):
+            if 'Независимо найди' in req[0]['content']:
+                return dict(evidence=[mine, other], complete=True)
+            return answer([mine], text='нет')
+        engine, _ = self.engine(respond)
+        result, _ = engine.answer(package, 'Требуется ли допуск Рубин? Ответьте да или нет.')
+        self.assertEqual((result['status'], result['answer']), ('ответ', 'нет'))
+
+    def test_explicitly_incomplete_single_batch_cannot_prove_absence(self):
+        package = self.package({'a.txt': 'Документы закупки.'})
+        missing = dict(status='нет в документах', answer='', quote='', file='', evidence=[])
+        def respond(req, call):
+            return dict(evidence=[], complete=False) if 'Независимо найди' in req[0]['content'] else missing
+        engine, _ = self.engine(respond)
+        result, _ = engine.answer(package, 'Где поставка?')
+        self.assertEqual(result['status'], 'не знаю')
+
     def test_a_b_shared_prompt_and_single_call(self):
         package = self.package({'a.txt': 'Документ о закупке.'})
         requests = []
@@ -268,16 +302,17 @@ class TrustTests(unittest.TestCase):
                          reranker_model='cifra48/rerank', jina_auth_header='X-API-Key',
                          qwen_api_key='synthetic-secret', jina_api_key='synthetic-secret', embedding_dimensions=2)
         requests = []
-        def transport(request, timeout):
-            body = json.loads(request.data)
-            headers = {key.lower(): value for key, value in request.header_items()}
+        import httpx
+        def transport(request):
+            body = json.loads(request.content)
+            headers = request.headers
             self.assertNotIn('python-urllib', headers['user-agent'].lower())
-            requests.append((request.full_url, body, headers))
-            if request.full_url.endswith('/chat/completions'):
+            requests.append((str(request.url), body, headers))
+            if str(request.url).endswith('/chat/completions'):
                 self.assertEqual(headers['authorization'], 'Bearer synthetic-secret')
                 self.assertNotIn('x-api-key', headers)
                 payload = dict(choices=[dict(message=dict(content=json.dumps(dict(status='не знаю'))), finish_reason='stop')])
-            elif request.full_url.endswith('/embeddings'):
+            elif str(request.url).endswith('/embeddings'):
                 self.assertEqual(headers['x-api-key'], 'synthetic-secret')
                 self.assertNotIn('authorization', headers)
                 self.assertEqual(body, dict(model='cifra48/embedding', input=['query'],
@@ -288,10 +323,9 @@ class TrustTests(unittest.TestCase):
                 self.assertEqual(body['model'], 'cifra48/rerank')
                 self.assertEqual(body['top_n'], 2)
                 payload = dict(results=[dict(index=1, score=.9), dict(index=0, score=.1)])
-            response = io.BytesIO(json.dumps(payload).encode())
-            response.status = 201
-            return response
-        with patch('trustqa.api.urllib.request.urlopen', side_effect=transport):
+            return httpx.Response(201, json=payload)
+        http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+        with patch('app.llm.http_client', return_value=http):
             self.assertEqual(Qwen(config).complete([dict(role='user', content='test')])['status'], 'не знаю')
             self.assertEqual(Jina(config).embeddings(['query'], 'retrieval.query'), [[1., 0.]])
             chunks = chunk_text('a.txt', '1. Первый документ.\n2. Второй документ.')
@@ -382,6 +416,13 @@ class TrustTests(unittest.TestCase):
         self.assertEqual(fake.calls.count('Первый'), 1)
         with Path(args.output).open(encoding='utf-8') as f:
             self.assertEqual(len(list(csv.DictReader(f, delimiter=';'))), 2)
+
+    def test_experiment_rejects_custom_checker_before_execution(self):
+        from trustqa.evaluation import evaluate
+        checker = self.root / 'check.py'
+        checker.write_text('raise AssertionError("executed")', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'installed official checker'):
+            evaluate(self.root / 'none.csv', self.root / 'none.json', self.root / 'packages', checker)
 
     def test_official_checker_and_report_on_synthetic_fixture(self):
         from trustqa.evaluation import evaluate, report

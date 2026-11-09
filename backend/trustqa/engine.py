@@ -102,6 +102,7 @@ class Engine:
             batches = self.window.pack(question, files, chunks, SCAN,
                                        dict(issues=package.issues, amendments_enabled=amendments))
             collected = []
+            rejected_sources = []
             for batch in batches:
                 request = messages(question, files, batch, SCAN,
                                    dict(issues=package.issues, amendments_enabled=amendments))
@@ -113,7 +114,7 @@ class Engine:
                     # A single batch already contains the whole package, so an explicit
                     # complete flag is only required when several batches were sent.
                     return isinstance(value.get('evidence'), list) and (
-                        value.get('complete') is True or len(batches) == 1)
+                        value.get('complete', len(batches) == 1) is True)
                 if not scan_ok(scan):
                     scan = correct(request, scan, 'Scan must return evidence array and complete=true')
                 if not scan_ok(scan):
@@ -123,6 +124,11 @@ class Engine:
                         collected.append(accept(item))
                     except (VerificationError, TypeError, KeyError) as exc:
                         audit['events'].append(dict(kind='scan_evidence_rejected', reason=str(exc)))
+                        if isinstance(item, dict):
+                            file, quote = item.get('file'), item.get('quote')
+                            if (isinstance(file, str) and isinstance(quote, str) and len(norm(quote)) >= 8
+                                    and norm(quote) in norm(package.documents.get(file, ''))):
+                                rejected_sources.append(item)
             audit['full_scan'] = bool(chunks) and len(batches) > 0
             audit['scan_batches'] = len(batches)
             if mode == 'D':
@@ -153,7 +159,12 @@ class Engine:
                                      check_quotes=disable != 'quotes', arithmetic=disable != 'arithmetic', amendments=amendments)
                     # A synthesis cannot silently discard different independently found values.
                     if checked['status'] != 'не знаю':
-                        for item in collected:
+                        unresolved = rejected_sources
+                        if checked['status'] != 'нет в документах':
+                            # A grounded answer to the named subject need not cite a different subject.
+                            unresolved = [item for item in rejected_sources if not anchor_issue(
+                                item['quote'], item.get('unit', ''), anchors)]
+                        for item in collected + unresolved:
                             if not any(same_witness(item, x)
                                        for x in checked.get('evidence', [])):
                                 raise VerificationError('Synthesis discarded independently found witness')

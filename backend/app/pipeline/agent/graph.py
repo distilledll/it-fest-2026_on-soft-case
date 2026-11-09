@@ -35,11 +35,12 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app import llm
-from app.ingest import norm
+from app.ingest import needs_redaction_review, norm, redact
 from app.pipeline.agent import prompts
 from app.pipeline.agent.context import build_context
 from app.pipeline.agent.critics import CRITICS, MULTIPART_CTX, Draft, Issue, run_critics
 from app.schemas import Document, Status, TraceStep
+from app.verify import STAMP, moscow_deadline
 
 STATUSES = {s.value for s in Status}
 
@@ -55,6 +56,8 @@ class State(TypedDict, total=False):
     fragments: bool            # модель видит фрагменты, а не документы целиком
     researched: bool           # повторный поиск перед «нет в документах» уже был
     quotes_ready: bool         # шаг «сначала цитаты» выполнен (узел map)
+    unreadable: bool
+    redacted: bool
     incomplete_map: bool
     auto_map: bool             # map включён автоматически: закупка не влезла в контекст
     vote: dict | None          # итог голосования (опция votes)
@@ -104,8 +107,11 @@ async def prepare(state: State, config) -> dict:
         notes.append(f"эмбеддинги не работают ({info['embed_error']}) — поиск только по словам")
     if info.get("chunks") is not None:
         notes.append(f"фрагментов: {info['chunks']} из файлов {', '.join(info.get('files', []))}")
+    unreadable = any(d.encoding.endswith("-replace") or "\x00" in d.text for d in docs)
     return {"context": context, "messages": msgs, "attempts": 0, "llm_calls": 0, "warned": [],
             "fragments": info["mode"] != "full", "researched": False,
+            "incomplete_map": info["mode"] != "full", "redacted": any(needs_redaction_review(d.text) for d in docs),
+            "unreadable": unreadable,
             "trace": [TraceStep(node="prepare", ok=True, message="; ".join(notes), data=info)]}
 
 
@@ -143,7 +149,7 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     if map_mode:
         got, calls, read_all = await _map_extract(state["question"], docs, ctx)
         coverage = ("Прочитаны ВСЕ фрагменты документов закупки." if read_all else
-                    "Прочитаны только фрагменты, отобранные поиском: если ответа нет — лучше «не знаю», чем «нет в документах».")
+                    "Прочитаны только фрагменты, отобранные поиском: окончательный вывод требует проверки оставшихся фрагментов.")
     else:
         raw = await llm.chat(ctx.model("answer"), json=True, messages=[
             {"role": "user", "content": prompts.EXTRACT.format(context=state["context"], question=state["question"])}])
@@ -156,19 +162,20 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     lines, kept, dropped, seen = [], 0, 0, set()
     for q in got:
         text, file = str(q.get("quote") or ""), str(q.get("file") or "")
-        doc = quote_exists(text, docs)
+        candidates = [d for d in docs if not file or d.file == file]
+        doc = quote_exists(text, candidates)
         if not doc:
-            snapped = snap_quote(text, docs)
+            snapped = snap_quote(text, candidates) if file or len(candidates) == 1 else None
             if not snapped:
                 dropped += 1
                 continue
             text, file = snapped
         else:
             file = doc.file
-        if is_injection(text) or text.lower() in seen:
+        if is_injection(text) or (file, norm(text)) in seen:
             dropped += 1
             continue
-        seen.add(text.lower())
+        seen.add((file, norm(text)))
         tags = []
         if file in by_file and is_amendment_doc(by_file[file]):
             tags.append("[ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ]")
@@ -177,8 +184,8 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
             if map_mode:          # в map-reduce старую редакцию не показываем, а подставляем то, что её заменило
                 stale += 1
                 repl = old_by.repeal_text if old_by.repealed else old_by.new_text
-                if repl and repl.lower() not in seen:
-                    seen.add(repl.lower())
+                if repl and (old_by.amend_file, norm(repl)) not in seen:
+                    seen.add((old_by.amend_file, norm(repl)))
                     note = (f"пункт отменён, требования больше нет; отменённый текст: «{text}»" if old_by.repealed
                             else "заменяет старую редакцию")
                     lines.append(f"- ({old_by.amend_file}) [ИЗМЕНЕНИЕ ИЗВЕЩЕНИЯ, {note}] «{repl}»")
@@ -208,10 +215,17 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
     Узкая задача на коротком тексте — по силам и маленькой модели. Фрагменты обрабатываются параллельно.
     Если фрагментов больше map_max_chunks, сначала отбираем лучшие (BM25), изменения извещения — всегда."""
     from app import retrieval
-    from app.pipeline.agent.context import redact
     from app.pipeline.agent.critics import is_amendment_doc
 
     size, overlap = int(_opt(ctx, "map_chunk_chars", 4000)), 200
+    limit = max(1, int(_opt(ctx, "map_max_chunks", 30)))
+    if not _opt(ctx, "map_chunk_chars", None):
+        # Укрупняем фрагменты в пределах окна, чтобы прочитать пакет за тот же бюджет вызовов.
+        total = sum(len(d.text) for d in docs)
+        slots = max(1, limit - len(docs))
+        if total > slots * (size - overlap):
+            target = total // slots + 2 * overlap
+            size = max(size, min(target, size * 4, context_budget(ctx) // 2))
     chunks: list[tuple[Document, str]] = []
     for d in docs:
         if d.is_empty:
@@ -227,7 +241,6 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
                 break
             pos = max(end - overlap, pos + 1)
     # читаем всё: только тогда «нет в документах» обоснован; поиск отбирает фрагменты лишь для огромных документов
-    limit = int(_opt(ctx, "map_max_chunks", 30))
     read_all = len(chunks) <= limit
     if not read_all:
         must = [c for c in chunks if is_amendment_doc(c[0])]
@@ -337,10 +350,12 @@ async def map_node(state: State, config) -> dict:
     auto = not _opt(ctx, "quote_first", False)
     st = {**state, "auto_map": auto}
     msgs, steps, calls = await _quote_first(st, docs, ctx)
+    complete = steps[-1].data["complete"]
+    incomplete = state.get("fragments", False) if complete is None else not complete
     if auto:
         steps = [TraceStep(node="map", ok=None, message="закупка не влезает в контекст модели — читаем по фрагментам")] + steps
     # map уже прочитал закупку целиком (или лучшие фрагменты всех файлов) — повторный поиск не нужен
-    return {"messages": msgs, "incomplete_map": any(step.data.get("complete") is False for step in steps),
+    return {"messages": msgs, "incomplete_map": incomplete,
             "quotes_ready": True, "auto_map": auto, "researched": True,
             "llm_calls": state["llm_calls"] + calls, "trace": steps}
 
@@ -413,15 +428,34 @@ async def llm_critic(state: State, config) -> dict:
     if d.status in ("нет в документах", "не знаю"):
         return {"critic_ok": True}
     prof = ctx.model("critic")
-    raw = await llm.chat(prof, json=True, messages=[{"role": "user", "content": prompts.CRITIC.format(
-        question=state["question"], status=d.status, answer=d.answer, file=d.file, quote=d.quote,
-        calc=d.calc or "—", around=_around(d, docs), evidence=_evidence_text(d, docs))}])
-    calls = state["llm_calls"] + 1
-    try:
-        j = llm.parse_json(raw)
-        ok, problem = bool(j.get("ok")), str(j.get("problem") or "")
-    except (ValueError, TypeError):
-        ok, problem = True, ""   # критик сломался — не наказываем ответ, прошедший проверки кодом
+    question, value, calc = state["question"], d.answer, d.calc
+    converted = moscow_deadline(question, d.quote, d.file, docs)
+    if converted and d.status == "ответ" and converted == value:
+        # Python уже проверил перевод. Критик сверяет смысл исходного срока и его применимость.
+        question = ("Какие местные дата и время в источнике соответствуют сроку подачи заявок "
+                    "из вопроса «" + question + "»? Проверь, что это именно нужный срок.")
+        value = " ".join(STAMP.search(d.quote).groups())
+        calc = None
+    messages = [{"role": "user", "content": prompts.CRITIC.format(
+        question=question, status=d.status, answer=value, file=d.file, quote=d.quote,
+        calc=calc or "—", around=_around(d, docs), evidence=_evidence_text(d, docs))}]
+    calls = state["llm_calls"]
+    for attempt in range(2):
+        raw = await llm.chat(prof, json=True, messages=messages)
+        calls += 1
+        try:
+            decision = llm.parse_json(raw)
+            ok = decision.get("ok")
+            if type(ok) is not bool:
+                raise ValueError("ok must be boolean")
+            problem = str(decision.get("problem") or "ответ не подтверждён")
+            break
+        except (ValueError, AttributeError, TypeError):
+            if attempt == 1:
+                message = "Критик дважды вернул некорректное решение; нужна повторная проверка источников."
+                return {"critic_ok": False, "llm_calls": calls, "issues": [Issue("critic_format", message)],
+                        "trace": [TraceStep(node="llm_critic", ok=False, message=message)]}
+            messages.append({"role": "user", "content": 'Верни объект JSON. Поле ok — только true или false.'})
     if ok:
         return {"critic_ok": True, "llm_calls": calls,
                 "trace": [TraceStep(node="llm_critic", ok=True, message=f"критик ({prof.model}) согласен")]}
@@ -459,9 +493,9 @@ async def retry(state: State, config) -> dict:
 
 async def finalize(state: State, config) -> dict:
     d = state.get("draft")
-    if d and d.status == "нет в документах" and state.get("incomplete_map"):
+    if d and d.status != "не знаю" and any(state.get(k) for k in ("incomplete_map", "redacted", "unreadable")):
         return {"final": Draft(status="не знаю"), "trace": [TraceStep(
-            node="coverage", ok=False, message="Часть фрагментов не проверена. Отсутствие не подтверждено.")]}
+            node="coverage", ok=False, message="Для вывода требуется проверка пропущенных или скрытых фрагментов.")]}
     # warn по расхождению, оставшийся после исчерпания попыток, — тоже не сдаём: пропущенное расхождение = обман
     # Неразрешённое расхождение по собственным evidence модели — не сдаём. Подозрение от сверки кодом
     # (crosscheck) — тоже, но только если критик-модель не подтвердил, что это другой параметр.
@@ -494,7 +528,7 @@ def after_check(state: State, config) -> str:
 
 def after_critic(state: State, config) -> str:
     _, ctx = _cfg(config)
-    if state.get("critic_ok"):
+    if state.get("critic_ok") or any(i.critic == "critic_format" for i in state.get("issues", [])):
         return "finalize"
     return "retry" if state["attempts"] < _opt(ctx, "max_attempts", 3) else "finalize"
 
@@ -533,7 +567,7 @@ def _evidence(raw) -> list[dict]:
 def _evidence_text(d: Draft, docs: list[Document]) -> str:
     from app.pipeline.agent.critics import parse_amendments
     from app.verify import quote_exists
-    rows = [f"- {e['file']}: «{e['quote']}» → {e['value']}" for e in d.evidence if quote_exists(e["quote"], docs)]
+    rows = [f"- {e['file']}: «{e['quote']}» → {e['value']}" for e in d.evidence if quote_exists(e["quote"], docs, e["file"])]
     # цитата — строка изменения извещения: критик должен видеть, что именно было отменено или заменено,
     # иначе «пункт 2.6 утратил силу» для него не связан с параметром из вопроса
     cited = norm(" ".join([d.quote] + [e["quote"] for e in d.evidence]))
@@ -549,7 +583,7 @@ def _evidence_text(d: Draft, docs: list[Document]) -> str:
 def _around(d: Draft, docs: list[Document], width: int = 400) -> str:
     for doc in docs:
         if doc.file == d.file:
-            t, q = norm(doc.text), norm(d.quote)
+            t, q = norm(redact(doc.text)[0]), norm(d.quote)
             i = t.find(q)
             if i >= 0:
                 return t[max(0, i - width): i + len(q) + width]

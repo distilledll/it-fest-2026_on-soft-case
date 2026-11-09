@@ -53,7 +53,7 @@ storage/             (в корне репо, в .gitignore) datasets/, runs/, m
 
 Профиль — это подключение: `base_url`, `model`, ключ, `extra_headers`, `temperature`, `max_tokens`,
 `disable_thinking`, `extra_body`. Роль указывает, какой профиль для чего используется:
-`answer`, `critic`, `embed`, `rerank`. Если для роли профиль не назначен, берётся профиль `answer`.
+`answer`, `critic`, `embed`, `rerank`. Сохранённый профиль `answer` применяется и в резервном проходе гибрида. Для поиска TrustQA берёт назначенные профили `embed` и `rerank`, а при отсутствии назначения — соответствующие параметры `JINA_*`.
 
 - Ключ лучше хранить в `.env` и указывать в профиле имя переменной (`api_key_env`).
   Ключ, сохранённый через API, лежит в `storage/models.json` и наружу не отдаётся (`has_key: true/false`).
@@ -68,7 +68,7 @@ storage/             (в корне репо, в .gitignore) datasets/, runs/, m
 
 - Модели: `cifra48/llm` и `cifra48/agent` — это одна и та же модель (`llm` ведёт на `agent`), плюс `cifra48/embedding`.
   Сравнивать их между собой бессмысленно; варьировать можно `reasoning_effort` (low/medium/high).
-  Контекст 262k токенов: закупка целиком влезает с запасом. Реранкера в шлюзе нет.
+  Окно задают в профиле модели. Для поиска TrustQA шаблон окружения задаёт нативный эндпоинт реранка.
 - Авторизация: `Authorization: Bearer <ключ>` или `X-API-Key`, OpenAI SDK работает как есть.
 - WAF отвечает 403 на дефолтный User-Agent. В профиле нужен `extra_headers: User-Agent=Mozilla/5.0 ...`.
 - **Параллельность задаётся по лимиту ключа** (`LLM_CONCURRENCY`, `--concurrency N`) и влияет только на скорость.

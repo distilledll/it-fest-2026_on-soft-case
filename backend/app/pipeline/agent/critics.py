@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from app.ingest import is_injection, norm
 from app.schemas import Document
 from app.numwords import word_numbers
-from app.verify import nearby, number_pool, numbers, quote_exists, snap_quote
+from app.verify import calendar_days, moscow_deadline, nearby, number_pool, numbers, quote_exists, snap_quote
+from trustqa.validation import conflict_shared_subject
 
 
 @dataclass
@@ -64,7 +65,7 @@ def has_negation(text: str) -> bool:
 # ---------------------------------------------------------------- изменения извещения
 
 AMEND_ITEM_RE = re.compile(
-    r"Пункт\s+«(?P<old>.+?)…?»\s*\((?P<file>[\w.\-]+)\)\s*изложить\s+в\s+следующей\s+редакции:\s*«(?P<new>.+?)»\s*\.?\s*$",
+    r"Пункт\s+«(?P<old>.+?)…?»\s*\((?P<file>[^()\n]+?\.txt)\)\s*изложить\s+в\s+следующей\s+редакции:\s*«(?P<new>.+?)»\s*\.?\s*$",
     re.IGNORECASE | re.MULTILINE)
 
 
@@ -81,10 +82,10 @@ class Amendment:
 
 
 AMEND_NUM_RE = re.compile(
-    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[\w.\-]+)\)\s*)?[^«\n]{0,80}?"
+    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[^()\n]+?\.txt)\)\s*)?[^«\n]{0,80}?"
     r"изложить\s+в\s+(?:следующей|новой)\s+редакции:?\s*«(?P<new>.+?)»", re.M)
 REPEAL_RE = re.compile(
-    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[\w.\-]+)\)\s*)?[^\n]{0,80}?"
+    r"[Пп]ункт\s+(?P<num>\d+(?:\.\d+)+)\.?\s*(?:извещения\s*)?(?:\((?P<file>[^()\n]+?\.txt)\)\s*)?[^\n]{0,80}?"
     r"(?:признать|считать)\s+утратившим\s+силу", re.M)
 
 
@@ -186,11 +187,12 @@ def critic_quote(d: Draft, docs: list[Document], question: str, amendments: list
         return []
     if len(norm(d.quote)) < 8:
         return [Issue("quote", "нет цитаты или она короче 8 символов — приведи дословный фрагмент документа")]
-    doc = quote_exists(d.quote, docs)
+    candidates = [doc for doc in docs if not d.file or doc.file == d.file]
+    doc = quote_exists(d.quote, candidates)
     if doc:
         d.file = doc.file
         return []
-    snapped = snap_quote(d.quote, docs)
+    snapped = snap_quote(d.quote, candidates) if d.file or len(candidates) == 1 else None
     if snapped:
         d.quote, d.file = snapped
         return []
@@ -208,6 +210,12 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
     (для расхождения и вопросов из нескольких частей — ещё и в подтверждённых evidence)."""
     if d.status not in ("ответ", "расхождение") or is_calc(question):
         return []
+    converted = moscow_deadline(question, d.quote, d.file, docs)
+    if d.status == "ответ" and converted is not None:
+        if converted and d.answer.strip() == converted:
+            return []
+        return [Issue("number", f"Переведи местный срок в московское время с учётом даты. "
+                                f"Проверенный результат: {converted or 'недостаточно данных'}.")]
     a_nums = numbers(d.answer)
     if not a_nums:
         return []
@@ -215,7 +223,7 @@ def critic_number(d: Draft, docs: list[Document], question: str, amendments: lis
     pool = number_pool(around)
     if d.status == "расхождение" or MULTIPART_CTX.get():
         for e in d.evidence:
-            if quote_exists(e.get("quote", ""), docs):
+            if quote_exists(e.get("quote", ""), docs, e.get("file", "")):
                 ev = nearby(e["quote"], docs, e.get("file", ""))
                 pool += number_pool(ev)
     missing = [a for a in a_nums if not any(abs(a - p) < 0.01 for p in pool)]
@@ -275,16 +283,28 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
     if d.status in ("нет в документах", "не знаю") or is_calc(question):
         return []
     live = []
+    witnesses = []
     for e in d.evidence:
         q, f = e.get("quote", ""), e.get("file", "")
-        if not quote_exists(q, docs) or superseded_by(q, f, amendments) or is_injection(nearby(q, docs, f, width=80)):
+        if not f or not quote_exists(q, docs, f) or superseded_by(q, f, amendments):
             continue
+        witnesses.append(e)
         # значение — из поля value; из цитаты только без номера пункта («2.6. Требование…» — не значение 2.6)
         nums = numbers(_strip_refs(e.get("value", ""))) or numbers(_strip_refs(q))
+        days = calendar_days(q)
+        if len(days) == 1 and (not nums or nums[0] in days or len(numbers(_strip_refs(q))) <= 1):
+            nums = days
         if nums:
             live.append((f, nums[0], q, str(e.get("part") or "1")))
     distinct = {v for _, v, _, _ in live}
     files = {f for f, _, _, _ in live}
+    # Вопрос в днях: совпадение с исходным числом недель не подтверждает ответ.
+    if (d.status == "ответ" and not MULTI_Q.search(question) and len(distinct) == 1
+            and re.search(r"календарн\w*\s+(?:дн\w*|день)", question, re.I)
+            and any("недел" in norm(row[2]) for row in live)
+            and all(len(calendar_days(row[2])) == 1 for row in live)
+            and not distinct.intersection(numbers(d.answer))):
+        return [Issue("conflict", "Укажи срок в календарных днях, переведя каждую неделю в 7 дней.")]
     if d.status == "ответ" and len(distinct) > 1 and len(files) > 1:
         # сравниваем только упоминания одной и той же части вопроса (вопрос из нескольких частей — не расхождение)
         groups: dict[str, list] = {}
@@ -304,12 +324,25 @@ def critic_conflict(d: Draft, docs: list[Document], question: str, amendments: l
                           data={"values": sorted(vals)})]
     if d.status == "расхождение":
         a_nums = set(numbers(d.answer))
-        if len(a_nums) < 2:
-            return [Issue("conflict",
-                          "расхождение — это когда ОДИН И ТОТ ЖЕ параметр (срок, сумма, процент, дата) в разных файлах "
-                          "имеет разные значения, например «60 и 75». Если упоминания про разные требования или одно из "
-                          "них — отрицание («не установлено»), это не расхождение: ответь статусом «ответ». "
-                          "Если расхождение есть — в answer должны быть оба значения цифрами")]
+        if len({e["file"] for e in witnesses}) < 2:
+            return [Issue("conflict", "Для расхождения нужны подтверждающие цитаты из двух разных действующих файлов.")]
+        if len(files) >= 2 and len(distinct) == 1 and all(
+                len(calendar_days(row[2])) == 1 for row in live):
+            return [Issue("conflict", "Сроки совпадают после перевода в календарные дни. "
+                                      "Укажи срок в единицах вопроса со статусом «ответ».")]
+        if not live and not any(
+            left["file"] != right["file"] and left.get("part") == right.get("part")
+            and norm(left.get("value")) != norm(right.get("value"))
+            and conflict_shared_subject([left, right])
+            for i, left in enumerate(witnesses) for right in witnesses[i + 1:]
+        ):
+            hint = ("Для вопроса да/нет возьми пункт именно о названном объекте. Прямое отрицание "
+                    "требования в этом пункте означает «нет».") if is_yesno(question) else (
+                    "Для перечня укажи действующие требования и выбери основной цитатой пункт, который их устанавливает.")
+            return [Issue("conflict", "Цитаты не подтверждают два разных значения одного предмета. " + hint)]
+        if live and len(a_nums) < 2:
+            return [Issue("conflict", "Для числового расхождения укажи оба действующих значения "
+                                      "одного и того же параметра.")]
         if live and len(distinct) < 2:
             return [Issue("conflict", "найденные упоминания совпадают — расхождения нет, проверь ещё раз",
                           severity="warn")]
@@ -331,7 +364,7 @@ def critic_negation(d: Draft, docs: list[Document], question: str, amendments: l
     # весь ответ — отрицание («нет», «не требуется», «не установлено»), а не список с отрицанием одной части
     says_no = re.fullmatch(r"\W*(нет|не\s+(требует\w*|установлен\w*|предусмотрен\w*|предъявля\w*|нужн\w*)|"
                            r"отсутству\w*)(\W+\w+){0,3}\W*", ans) is not None
-    ev_neg = any(has_negation(e.get("quote", "")) and quote_exists(e.get("quote", ""), docs) for e in d.evidence)
+    ev_neg = any(has_negation(e.get("quote", "")) and quote_exists(e.get("quote", ""), docs, e.get("file", "")) for e in d.evidence)
     if says_no and not neg and not ev_neg and not numbers(d.answer):
         return [Issue("negation", f"ответ «{d.answer}» утверждает, что требования нет, но в цитате «{d.quote[:120]}» "
                                   f"нет отрицания. Приведи фразу документа, где сказано, что требование не установлено, "

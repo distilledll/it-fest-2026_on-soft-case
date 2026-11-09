@@ -16,7 +16,7 @@ def test_guarded_primary_then_verified_calculation(monkeypatch):
         yield TraceStep(node="answer", message="черновик")
         yield Answer(id=q.id, status=Status.ANSWER, answer="100", quote="Выдуманная цитата", llm_calls=2)
 
-    def review(q, docs, config):
+    def review(q, docs, config, transport, rerank_config, chat_ranker):
         return Answer(id=q.id, status=Status.ANSWER, answer="35", quote="Ставка 5 %.", file="n.txt",
                       llm_calls=3, trace=[TraceStep(node="trustqa", ok=True)])
 
@@ -60,7 +60,7 @@ def test_fallback_answer_goes_through_guard(monkeypatch):
     """Ответ TrustQA с цитатой, которой нет в документах, guard превращает в «не знаю»."""
     docs = [Document(package="P", file="n.txt", encoding="utf-8", text="Срок поставки 10 дней.")]
 
-    def review(q, docs, config):
+    def review(q, docs, config, transport, rerank_config, chat_ranker):
         return Answer(id=q.id, status=Status.ANSWER, answer="15", quote="Срок поставки 15 дней", file="n.txt",
                       llm_calls=3, trace=[TraceStep(node="trustqa", ok=True)])
     _setup_fallback(monkeypatch, review)
@@ -73,10 +73,18 @@ def test_fallback_failure_keeps_agent_unknown_without_error(monkeypatch):
     """Сбой TrustQA — не технический сбой вопроса: прогон не должен перезапускать его целиком."""
     from app.runs import is_failed
 
-    def review(q, docs, config):
+    def review(q, docs, config, transport, rerank_config, chat_ranker):
         raise RuntimeError("Mandatory context exceeds Qwen window")
     _setup_fallback(monkeypatch, review)
     q = Question(id="N", package="P", question="Какой срок поставки?")
     a = asyncio.run(get_pipeline("hybrid", use_guard=True).answer(q, [], Context()))
     assert a.status == Status.UNKNOWN and not is_failed(a)
     assert [s.node for s in a.trace][-1] == "trustqa" and a.trace[-1].ok is False
+
+
+def test_incomplete_positive_and_redacted_claim_require_review():
+    draft = Draft(status="ответ", answer="4", quote="Нужно 4 экземпляра", file="a.txt")
+    for flag in ("incomplete_map", "redacted"):
+        out = asyncio.run(finalize({"draft": draft, flag: True}, {}))
+        assert out["final"].status == Status.UNKNOWN
+        assert out["trace"][0].node == "coverage"

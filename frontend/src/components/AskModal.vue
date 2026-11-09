@@ -20,6 +20,15 @@ const question = ref('')
 const asking = ref(false)
 const answer = ref<Answer | null>(null)
 const steps = ref<TraceStep[]>([])
+const sources = computed(() => {
+  const result = answer.value
+  if (!result?.quote) return []
+  const all = [...(result.evidence ?? [])]
+  if (!all.some(s => s.file === result.file && s.quote === result.quote)) {
+    all.unshift({ file: result.file, quote: result.quote, value: '' })
+  }
+  return all
+})
 const error = ref('')
 
 let controller: AbortController | null = null
@@ -195,9 +204,10 @@ onUnmounted(() => {
               </span>
             </div>
             <p class="answer__value">{{ answer.answer }}</p>
-            <blockquote v-if="answer.quote" class="answer__quote">
-              «{{ answer.quote }}»
-              <cite v-if="answer.file" class="answer__file mono">{{ packageId }}/{{ answer.file }}</cite>
+            <blockquote v-for="(source, i) in sources" :key="i" class="answer__quote">
+              <strong v-if="sources.length > 1 && source.value && source.quote.includes(source.value)">{{ source.value }}<br></strong>
+              «{{ source.quote }}»
+              <cite v-if="source.file" class="answer__file mono">{{ packageId }}/{{ source.file }}</cite>
             </blockquote>
           </div>
         </transition>

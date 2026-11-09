@@ -41,6 +41,7 @@ export interface Answer {
   answer: string
   quote: string
   file: string
+  evidence?: { file: string; quote: string; value: string }[]
   trace: TraceStep[]
   llm_calls: number
   elapsed_s: number

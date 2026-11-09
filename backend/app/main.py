@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -11,7 +13,16 @@ from app.pipeline.base import available
 settings.runs_dir.mkdir(parents=True, exist_ok=True)
 settings.datasets_dir.mkdir(parents=True, exist_ok=True)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        await llm.close_clients()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="ОНСОФТ: ИИ, который не обманывает",
     version="0.4.0",
     description=(

@@ -19,7 +19,10 @@ class Config:
     jina_base_url: str = "https://api.jina.ai/v1"
     jina_api_key: str = ""
     jina_auth_header: str = "Authorization"
-    embedding_dimensions: int = 1024
+    embedding_dimensions: int | None = 1024
+    embedding_query_task: str = "retrieval.query"
+    embedding_passage_task: str = "retrieval.passage"
+    embedding_protocol: str = "jina"
     embedding_model: str = "jina-embeddings-v3"
     embedding_version: str = "jina-embeddings-v3"
     reranker_model: str = "jina-reranker-v2-base-multilingual"
@@ -58,6 +61,8 @@ class Config:
             raise ValueError('JINA_AUTH_HEADER must be Authorization or X-API-Key')
         if obj.reasoning_effort not in ('', 'low', 'medium', 'high'):
             raise ValueError('QWEN_REASONING_EFFORT must be low, medium or high')
+        if obj.embedding_protocol not in ("jina", "openai"):
+            raise ValueError("Unsupported embedding protocol")
         if obj.embedding_dimensions < 1:
             raise ValueError('JINA_EMBEDDING_DIMENSIONS must be positive')
         for url in (obj.qwen_base_url, obj.jina_base_url):
@@ -72,7 +77,12 @@ class Config:
         return obj
 
     def public(self):
-        return {k: v for k, v in asdict(self).items() if "api_key" not in k}
+        result = {k: v for k, v in asdict(self).items() if "api_key" not in k}
+        # Older checkpoint manifests implicitly used the standard Jina request format.
+        for key in ("embedding_query_task", "embedding_passage_task", "embedding_protocol"):
+            if result[key] == getattr(Config, key):
+                del result[key]
+        return result
 
     def require_qwen(self):
         if not all((self.qwen_base_url, self.qwen_model, self.qwen_model_version)):

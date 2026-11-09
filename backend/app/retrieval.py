@@ -179,16 +179,20 @@ RERANK = """Оцени, насколько каждый фрагмент док�
 Верни только JSON: {{"scores": {{"<номер>": оценка, ...}}}}"""
 
 
-async def rerank(question: str, chunks: list[Chunk], ctx, keep: int = 10) -> tuple[list[Chunk], int]:
-    """Реранк моделью (роль rerank, иначе critic/answer): один запрос на все фрагменты."""
-    if len(chunks) <= keep:
-        return chunks, 0
+async def ranked_indices(question, chunks, profile: llm.ModelProfile) -> list[int]:
     frags = "\n\n".join(f"[{i}] ({c.file}) {c.text[:700]}" for i, c in enumerate(chunks))
-    raw = await llm.chat(ctx.model("rerank"), json=True, messages=[
+    raw = await llm.chat(profile, json=True, messages=[
         {"role": "user", "content": RERANK.format(question=question, fragments=frags)}])
     try:
         scores = {int(k): float(v) for k, v in llm.parse_json(raw).get("scores", {}).items()}
     except (ValueError, TypeError, AttributeError):
-        return chunks[:keep], 1
-    best = sorted(range(len(chunks)), key=lambda i: -scores.get(i, 0))[:keep]
+        return list(range(len(chunks)))
+    return sorted(range(len(chunks)), key=lambda i: -scores.get(i, 0))
+
+
+async def rerank(question: str, chunks: list[Chunk], ctx, keep: int = 10) -> tuple[list[Chunk], int]:
+    """Реранк моделью (роль rerank, иначе critic/answer): один запрос на все фрагменты."""
+    if len(chunks) <= keep:
+        return chunks, 0
+    best = (await ranked_indices(question, chunks, ctx.model("rerank")))[:keep]
     return [chunks[i] for i in sorted(best)], 1

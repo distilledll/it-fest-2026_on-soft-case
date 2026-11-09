@@ -33,7 +33,11 @@ class EmbeddingCache:
             db.execute("CREATE TABLE IF NOT EXISTS embeddings (key TEXT PRIMARY KEY, vector TEXT NOT NULL)")
 
     def vectors(self, texts, config, client, task):
-        keys = [sha256(json.dumps([config.jina_base_url, config.embedding_model, config.embedding_version, config.embedding_dimensions, task, t], ensure_ascii=False).encode()).hexdigest() for t in texts]
+        model = [config.jina_base_url, config.embedding_model, config.embedding_version, config.embedding_dimensions]
+        wire_task = config.embedding_query_task if task == "retrieval.query" else config.embedding_passage_task
+        if config.embedding_protocol != "jina" or wire_task != task:
+            model.extend([wire_task, config.embedding_protocol])
+        keys = [sha256(json.dumps([*model, task, t], ensure_ascii=False).encode()).hexdigest() for t in texts]
         with sqlite3.connect(self.path, timeout=30) as db:
             found = {key: json.loads(row[0]) for key in set(keys)
                      if (row := db.execute("SELECT vector FROM embeddings WHERE key=?", (key,)).fetchone())}
@@ -56,8 +60,9 @@ def cosine(a, b):
 
 
 class Retriever:
-    def __init__(self, config, client):
+    def __init__(self, config, client, ranker=None):
         self.config, self.client = config, client
+        self.ranker = ranker or client.rerank
         self.cache = EmbeddingCache(config.cache_dir)
 
     def search(self, package, question):
@@ -81,7 +86,7 @@ class Retriever:
                 selected.append(chunks[i])
                 counts[chunks[i].file] += 1
         try:
-            selected = self.client.rerank(question, selected)
+            selected = self.ranker(question, selected)
             mode += "+reranker"
         except ServiceUnavailable as exc:
             events.append(dict(reason=str(exc), mode=mode + "+vector_order" if mode == "jina" else mode + "+lexical_order"))

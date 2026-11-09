@@ -1,6 +1,6 @@
 """Gold data is accessible exclusively from this explicitly invoked evaluation module."""
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import replace
 import html
 import importlib.util
@@ -9,9 +9,10 @@ from pathlib import Path
 import subprocess
 import sys
 
+from app.config import settings
 from .cli import dataset, run_batch
 from .prompts import PROMPT_VERSION
-from .storage import atomic, digest
+from .storage import atomic
 
 
 def metrics(rows):
@@ -23,8 +24,12 @@ def metrics(rows):
 
 def evaluate(answers, gold_path, packages, checker_path):
     # Execute the unmodified official checker as required; capture its complete stdout.
-    checker_path = Path(checker_path).resolve()
-    proc = subprocess.run([sys.executable, str(checker_path), str(answers), '--gold', str(Path(gold_path).resolve()),
+    installed = settings.checker.resolve()
+    if checker_path and Path(checker_path).resolve() != installed:
+        if Path(checker_path).read_bytes() != installed.read_bytes():
+            raise ValueError('Use the installed official checker')
+    checker_path = installed
+    proc = subprocess.run([sys.executable, "-I", str(checker_path), str(answers), '--gold', str(Path(gold_path).resolve()),
                            '--packages', str(packages), '--out', str(answers.with_name('verdicts.csv'))],
                           capture_output=True, text=True, check=True)
     atomic(answers.with_name('check.txt'), proc.stdout)

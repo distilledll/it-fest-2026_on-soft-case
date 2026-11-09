@@ -32,7 +32,7 @@ const ROLE_LABEL: Record<RoleName, string> = {
 }
 
 const ROLE_HINT: Record<RoleName, string> = {
-  answer: 'модель, которая отвечает на вопрос',
+  answer: 'модель для ответа агента и резервной проверки TrustQA',
   critic: 'критик-модель и перепроверка ответа',
   embed: 'эмбеддинги для поиска фрагментов (POST /embeddings)',
   rerank: 'модельная пересортировка фрагментов (опция пайплайна rerank)',
@@ -741,7 +741,7 @@ onMounted(load)
           </label>
           <p class="types__note muted">
             <AppIcon name="alert" size="sm" />
-            Отдельного реранкера в шлюзе нет: пайплайн пересортирует фрагменты чат-запросом этой модели.
+            Выбранный профиль оценивает фрагменты чат-запросом в обоих проходах. Без назначения TrustQA использует реранкер из JINA_* на сервере.
           </p>
         </AccordionItem>
       </div>

@@ -10,25 +10,12 @@ import inspect
 import re
 
 from app import retrieval
-from app.ingest import is_injection
+from app.ingest import redact
 from app.pipeline.agent.critics import is_amendment_doc
 from app.retrieval import Chunk
 from app.schemas import Document
 
 WORD = re.compile(r"[а-яёa-z0-9]{3,}", re.IGNORECASE)
-
-
-def redact(text: str) -> tuple[str, int]:
-    """Предложения с инструкциями для ИИ заменяем пометкой. Возвращает (текст, сколько вырезано)."""
-    n = 0
-    out = []
-    for s in re.split(r"(?<=[.!?\n])", text):
-        if is_injection(s):
-            n += 1
-            out.append("[фрагмент удалён: похоже на инструкцию для ИИ, это не часть условий закупки]")
-        else:
-            out.append(s)
-    return "".join(out), n
 
 
 def keyword_chunks(question: str, docs: list[Document], k: int = 12, size: int = 600) -> list[Chunk]:

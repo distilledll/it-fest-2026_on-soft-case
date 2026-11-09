@@ -16,7 +16,7 @@ from .documents import load_package
 from .engine import Engine
 from .prompts import PROMPT_VERSION
 from .retrieval import Retriever
-from .storage import RunStore, atomic, digest, read_questions, run_lock
+from .storage import RunStore, atomic, read_questions, run_lock
 
 
 @contextmanager
@@ -124,7 +124,7 @@ def parser():
     experiment = sub.add_parser('experiment', help='Frozen A–D evaluation and ablations')
     experiment.add_argument('--data', default='school21-onsoft-data')
     experiment.add_argument('--gold', required=True)
-    experiment.add_argument('--checker', default='school21-onsoft-data/check.py')
+    experiment.add_argument('--checker', help='Optional reference copy; must match the installed official checker')
     experiment.add_argument('--output-dir', default='results/experiment')
     experiment.add_argument('--ablations', action='store_true')
     report = sub.add_parser('report', help='Rebuild HTML comparison from evaluated runs')
