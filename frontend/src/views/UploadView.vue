@@ -3,10 +3,11 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppIcon from '@/components/AppIcon.vue'
 import CircleProgress from '@/components/CircleProgress.vue'
-import { countDocuments, deleteDataset, getDataset, getQuestions, listDatasets, uploadDataset } from '@/api/datasets'
+import { countDocuments, deleteDataset, getDataset, getQuestions, listDatasets, uploadDataset, uploadGold } from '@/api/datasets'
 import { ApiError, isCanceled } from '@/api/http'
 import { getHealth } from '@/api/system'
 import { useDataset } from '@/composables/useDataset'
+import { useRuns } from '@/composables/useRuns'
 import { plural } from '@/utils/presentation'
 import type { DatasetDetail, DatasetInfo, HealthInfo } from '@/types'
 
@@ -28,6 +29,41 @@ const health = ref<HealthInfo | null>(null)
 const offline = ref(false)
 
 const { active, setActive, clear } = useDataset()
+const { refresh: refreshRuns } = useRuns()
+
+/* Эталон догружается к набору без ответов: прогоны пересчитываются на сервере, дашборд обновляем опросом. */
+const goldInput = ref<HTMLInputElement | null>(null)
+const goldFor = ref('')
+const goldBusy = ref(false)
+const goldNotes = ref<Record<string, string>>({})
+
+function pickGold() {
+  goldInput.value?.click()
+}
+
+async function onGoldPicked(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  const id = goldFor.value
+  if (!file || !id) return
+  goldBusy.value = true
+  try {
+    const res = await uploadGold(id, file)
+    const miss = res.missing.length ? `, без эталона ${res.missing.length}` : ''
+    goldNotes.value = {
+      ...goldNotes.value,
+      [id]: `эталон ${res.gold} из ${res.questions} вопросов${miss}, пересчитано ${plural(res.rescored.length, ['прогон', 'прогона', 'прогонов'])}`,
+    }
+    if (dataset.value?.id === id) dataset.value = res.dataset
+    await refreshList()
+    await refreshRuns()
+  } catch (err) {
+    goldNotes.value = { ...goldNotes.value, [id]: err instanceof ApiError ? err.message : 'не удалось загрузить эталон' }
+  } finally {
+    goldBusy.value = false
+  }
+}
 
 const uploaded = ref<DatasetInfo[]>([])
 const removing = ref('')
@@ -344,7 +380,17 @@ onUnmounted(() => controller?.abort())
             <span v-if="d.has_questions" class="badge badge--info">вопросы</span>
             <span v-if="d.has_gold" class="badge badge--ok">эталон</span>
           </p>
+          <p v-if="goldNotes[d.id]" class="lib__sub">{{ goldNotes[d.id] }}</p>
           <div class="lib__acts">
+            <button
+              v-if="d.has_questions && !d.has_gold"
+              class="btn btn--ghost btn--sm"
+              type="button"
+              :disabled="goldBusy"
+              @click="goldFor = d.id; pickGold()"
+            >
+              {{ goldBusy && goldFor === d.id ? 'Загружаем…' : 'Загрузить ответы' }}
+            </button>
             <button
               class="btn btn--ghost btn--sm"
               type="button"
@@ -364,6 +410,7 @@ onUnmounted(() => controller?.abort())
           </div>
         </li>
       </ul>
+      <input ref="goldInput" type="file" accept=".json,application/json" class="visually-hidden gold-file-input" @change="onGoldPicked" />
     </section>
 
     <p class="drop__note muted">
@@ -548,6 +595,18 @@ onUnmounted(() => controller?.abort())
   list-style: none;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  border: 0;
+  padding: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 .lib__row {
   display: grid;
   align-items: center;
@@ -586,7 +645,19 @@ onUnmounted(() => controller?.abort())
 }
 
 @media (min-width: 760px) {
-  .lib__row {
+  .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  border: 0;
+  padding: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.lib__row {
     grid-template-columns: 1fr auto auto;
   }
 }

@@ -19,6 +19,7 @@ const {
   error,
   loadedAt,
   refresh,
+  resume,
   start,
   startBoth,
   ladderId,
@@ -41,6 +42,7 @@ const bothBusy = ref(false)
 const problem = ref('')
 const notice = ref('')
 const ready = ref(false)
+const resuming = ref('')
 
 const now = ref(Date.now())
 let tick: number | undefined
@@ -86,6 +88,22 @@ const statusBadge: Record<RunMeta['status'], string> = {
 const progressOf = (r: RunMeta) =>
   r.progress && r.progress.total ? Math.round((r.progress.done / r.progress.total) * 100) : 0
 const indexOf = (r: RunMeta) => (typeof r.score?.index === 'number' ? r.score.index : null)
+/** Дозапуск нужен, если прогон оборвался или часть вопросов упала (шлюз отвалился и т.п.). */
+const resumable = (r: RunMeta) =>
+  !resuming.value && (r.status === 'interrupted' || r.status === 'failed' || (r.status === 'done' && !!r.failed))
+
+async function onResume(r: RunMeta) {
+  problem.value = ''
+  resuming.value = r.run_id
+  try {
+    await resume(r.run_id)
+    notice.value = `Дозапускаем ${r.run_id} — долетят только недостающие и упавшие вопросы`
+  } catch (e) {
+    problem.value = e instanceof ApiError ? e.message : 'не удалось дозапустить прогон'
+  } finally {
+    resuming.value = ''
+  }
+}
 
 async function load() {
   try {
@@ -296,6 +314,10 @@ onBeforeUnmount(() => clearInterval(tick))
           <span class="badge">{{ r.guard ? 'проверки вкл' : 'без проверок' }}</span>
           <span v-if="indexOf(r) !== null" class="badge badge--accent">индекс {{ indexOf(r) }}</span>
           <span v-else-if="r.score?.error" class="badge badge--warn">оценка не получилась</span>
+          <span v-if="r.failed" class="badge badge--warn">упало {{ r.failed }}</span>
+          <button v-if="resumable(r)" class="btn btn--ghost btn--sm" type="button" @click="onResume(r)">
+            {{ resuming === r.run_id ? 'Дозапускаем…' : 'Дозапустить' }}
+          </button>
         </div>
 
         <div class="runs__meta muted">

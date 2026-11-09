@@ -1,7 +1,7 @@
 import { computed, onScopeDispose, ref } from 'vue'
 
 import { startLadder } from '@/api/ladders'
-import { startRun, listRuns, type RunStart } from '@/api/runs'
+import { resumeRun, startRun, listRuns, type RunStart } from '@/api/runs'
 import { ApiError } from '@/api/http'
 import type { RunMeta } from '@/types'
 
@@ -48,6 +48,12 @@ async function refresh(): Promise<void> {
     loading.value = false
     arm()
   }
+}
+
+/** Дозапуск упавшего/оборванного прогона: фоновая 202, прогресс придёт с тем же опросом. */
+async function resume(runId: string): Promise<void> {
+  await resumeRun(runId)
+  await refresh()
 }
 
 /** Прогон стартует фоном (202) — сразу возвращаем id, прогресс придёт с опросом. */
@@ -128,6 +134,7 @@ export function useRuns() {
     error,
     loadedAt,
     refresh,
+    resume,
     start,
     startBoth,
     forgetLadder,

@@ -132,6 +132,7 @@ watch([beforeId, afterId], async ([b, a]) => {
 const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : viewOf(releaseBefore)))
 const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : viewOf(releaseAfter)))
 const isSaved = computed(() => !pair.value)
+const fmtS = (v?: number) => (typeof v === 'number' ? `${v} с` : '—')
 
 const types = computed<string[]>(() => {
   const both = new Set([...Object.keys(before.value.byType), ...Object.keys(after.value.byType)])
@@ -284,7 +285,11 @@ function downloadCurrent() {
           </div>
           <div>
             <dt>запросов к модели</dt>
-            <dd>{{ after.meta.llm_calls ?? '—' }}</dd>
+            <dd>{{ before.meta.llm_calls ?? '—' }} → {{ after.meta.llm_calls ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>время</dt>
+            <dd>{{ fmtS(before.meta.elapsed_s) }} → {{ fmtS(after.meta.elapsed_s) }}</dd>
           </div>
           <div>
             <dt>проверки кодом</dt>

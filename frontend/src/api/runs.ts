@@ -35,4 +35,8 @@ export const compareRuns = (before: string, after: string) =>
 /** Разбор пойманных обманов — экран «как система поймала обман». */
 export const caughtRun = (runId: string) => getJson<unknown>(`/runs/${encodeURIComponent(runId)}/caught`)
 
+/** Дозапуск: недостающие и упавшие вопросы, остальное остаётся как было. 202 — прогресс в meta. */
+export const resumeRun = (runId: string) =>
+  postJson<{ run_id: string }>(`/runs/${encodeURIComponent(runId)}/resume`, {})
+
 export const answersCsvUrl = (runId: string) => apiUrl(`/runs/${encodeURIComponent(runId)}/answers.csv`)

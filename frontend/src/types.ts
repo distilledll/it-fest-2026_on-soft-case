@@ -84,6 +84,7 @@ export interface RunMeta {
   n?: number
   llm_calls?: number
   elapsed_s?: number
+  failed?: number
   statuses?: Record<Status, number>
   score?: RunScore
   progress?: { done: number; total: number; status: string }

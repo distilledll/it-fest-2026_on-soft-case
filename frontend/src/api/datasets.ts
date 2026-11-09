@@ -11,6 +11,22 @@ export const getQuestions = (id: string) =>
 
 export const deleteDataset = (id: string) => deleteRequest(`/datasets/${encodeURIComponent(id)}`)
 
+/** Ответ из POST /api/datasets/{id}/gold — сколько вопросов укрыл эталон и какие прогоны пересчитаны. */
+export interface GoldResult {
+  dataset: DatasetInfo
+  gold: number
+  questions: number
+  missing: string[]
+  rescored: { run_id: string; label: string; pipeline?: string | null; score?: { index?: number | null } | null }[]
+}
+
+/** POST /api/datasets/{id}/gold — answers_public.json к набору без эталона; прогоны пересчитываются сами. */
+export function uploadGold(id: string, file: File): Promise<GoldResult> {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  return sendFiles<GoldResult>(`/datasets/${encodeURIComponent(id)}/gold`, form)
+}
+
 export interface UploadOptions {
   files: File[]
   /** Имя датасета в списке; пусто — бэкенд подставит имя архива. */
