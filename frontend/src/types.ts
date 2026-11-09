@@ -41,6 +41,7 @@ export interface Answer {
   answer: string
   quote: string
   file: string
+  evidence?: { file: string; quote: string; value: string }[]
   trace: TraceStep[]
   llm_calls: number
   elapsed_s: number
@@ -158,7 +159,7 @@ export interface ModelProfilePublic {
   temperature: number
   max_tokens: number | null
   concurrency: number
-  context_window: number
+  context_window: number | null
   disable_thinking: boolean
   json_mode: boolean
   reasoning_effort: string | null

@@ -68,7 +68,32 @@ def test_checker_from_archive_or_repo():
     from app.config import settings
     own = datasets.from_zip(make_zip({"packages/P01/a.txt": "т".encode(), "check.py": b"print('RESULT {}')"}), "x")
     path, src = datasets.checker_for(datasets.path_of(own))
-    assert path.parent == datasets.path_of(own) and src == "из архива"
+    assert not (datasets.path_of(own) / "check.py").exists()
+    assert path == settings.checker and "эталонный" in src
     plain = datasets.from_zip(make_zip({"packages/P01/a.txt": "т".encode()}), "y")
     path, src = datasets.checker_for(datasets.path_of(plain))
     assert path == settings.checker and path.is_file() and "эталонный" in datasets.info(plain)["checker"]
+
+
+@pytest.mark.parametrize("archive", [True, False])
+@pytest.mark.parametrize("reverse", [True, False])
+def test_import_preserves_distinct_source_names(archive, reverse):
+    from app.ingest import load_package
+
+    files = [("Приложение 1.txt", b"14"), ("Приложение_1.txt", b"26")]
+    if reverse:
+        files.reverse()
+    if archive:
+        did = datasets.from_zip(make_zip({f"packages/P/{f}": data for f, data in files}), "audit")
+    else:
+        did = datasets.from_files(files, "audit", "P")
+    docs = load_package(datasets.path_of(did), "P")
+    assert {d.file: d.text for d in docs} == {f: data.decode() for f, data in files}
+
+
+def test_duplicate_upload_is_rejected_and_rolled_back():
+    from app.config import settings
+
+    with pytest.raises(DatasetError, match="a.txt"):
+        datasets.from_files([("a.txt", b"14"), ("a.txt", b"26")], "duplicate")
+    assert not list(settings.datasets_dir.iterdir())

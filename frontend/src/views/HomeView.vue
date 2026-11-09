@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import AppIcon from '@/components/AppIcon.vue'
+import { releaseAfter } from '@/api/benchmark'
 import { listDatasets } from '@/api/datasets'
 import { listRuns } from '@/api/runs'
 import { formatIndex } from '@/utils/presentation'
 import type { DatasetInfo, RunMeta } from '@/types'
 
-/* Живые цифры с сервера: что грузили, чем последний прогон мерился, какой индекс вышел. */
+/* Живые цифры с сервера; если своих прогонов ещё нет — показываем замер релиза. */
 const dataset = ref<DatasetInfo | null>(null)
 const last = ref<RunMeta | null>(null)
 
@@ -20,6 +21,8 @@ onMounted(async () => {
   const done = runs.filter((r) => r.status === 'done')
   last.value = done.sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''))[done.length - 1] ?? null
 })
+
+const measure = computed<RunMeta | null>(() => last.value ?? (releaseAfter as RunMeta))
 </script>
 
 <template>
@@ -28,13 +31,9 @@ onMounted(async () => {
       <p class="eyebrow">ОНСОФТ · документы госзакупок</p>
       <h1>ИИ, который честно говорит «не знаю»</h1>
 
-      <!-- Текст заменим на ваш. -->
       <p class="lede home__text">
-        Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer pretium, sem vitae vehicula
-        faucibus, nisl augue viverra lorem, in tincidunt urna nibh vitae ipsum. Curabitur a elit a nibh
-        fringilla sagittis. Donec pulvinar, arcu eget tincidunt dictum, justo augue tempor nisi, eget
-        semper mi nunc non urna. Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere
-        cubilia curae; Sed commodo tellus a lectus ultricies, eget vestibulum nibh blandit.
+        Загрузите документы закупки и задайте вопрос. Система сверит условия, укажет источник
+        и покажет расхождения между документами. Ответы на весь набор можно скачать в CSV.
       </p>
 
       <div class="btn-row home__actions">
@@ -49,24 +48,24 @@ onMounted(async () => {
       </div>
     </div>
 
-    <section class="card home__strip reveal reveal-2" aria-label="Текущее состояние">
+    <section class="card home__strip reveal reveal-2" aria-label="Результат проверки релиза">
       <div class="strip__cell">
         <span class="strip__label">Датасет</span>
         <span class="strip__value">{{ dataset ? dataset.name : 'нет данных' }}</span>
       </div>
       <span class="strip__sep" aria-hidden="true" />
       <div class="strip__cell">
-        <span class="strip__label">Последний прогон</span>
+        <span class="strip__label">Замер релиза · 8 ноября</span>
         <span class="strip__value">
-          {{ last ? last.label || last.pipeline : 'ещё не запускался' }}
-          <span v-if="last" class="badge badge--ok">готово</span>
+          {{ measure ? measure.label || measure.pipeline : 'ещё не запускался' }}
+          <span v-if="measure" class="badge badge--ok">готово</span>
         </span>
       </div>
       <span class="strip__sep" aria-hidden="true" />
       <div class="strip__cell">
         <span class="strip__label">Индекс доверия</span>
         <span class="strip__value strip__value--num">
-          {{ last?.score?.index === undefined || last?.score?.index === null ? '—' : formatIndex(last.score.index) }}
+          {{ measure?.score?.index === undefined || measure?.score?.index === null ? '—' : formatIndex(measure.score.index) }}
         </span>
       </div>
     </section>

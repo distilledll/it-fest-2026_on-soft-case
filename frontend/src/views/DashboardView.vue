@@ -5,6 +5,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import BeforeAfterChart from '@/components/BeforeAfterChart.vue'
 import RunsPanel from '@/components/RunsPanel.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
+import { releaseAfter, releaseBefore, shortType } from '@/api/benchmark'
 import { listDatasets } from '@/api/datasets'
 import { ApiError } from '@/api/http'
 import { answersCsvUrl, compareRuns } from '@/api/runs'
@@ -39,24 +40,6 @@ function viewOf(meta: RunMeta): RunView {
   return { meta, byType, scored, index }
 }
 
-/** Короткие подписи типов вопросов для осей графиков. */
-const SHORT: Record<string, string> = {
-  'факт': 'факт',
-  'расчёт': 'расчёт',
-  'после изменений': 'после изм.',
-  'ловушка: нет в документах': 'нет в док.',
-  'ловушка: требования нет': 'треб. нет',
-  'расхождение': 'расхождение',
-}
-const shortType = (type: string) => SHORT[type] ?? type
-
-/** Пустой прогон: пока пары нет, экран обязан показывать прочерки, а не выдуманные цифры. */
-const EMPTY_VIEW: RunView = {
-  meta: { run_id: '', label: '', dataset: '', pipeline: '', guard: false, status: 'done', created_at: '' },
-  byType: {},
-  scored: false,
-  index: null,
-}
 
 const { finished, loading, refresh } = useRuns()
 const { active, setActive } = useDataset()
@@ -136,19 +119,21 @@ watch([beforeId, afterId], async ([b, a]) => {
     return
   }
   try {
-    pair.value = await compareRuns(b, a)
+    const result = await compareRuns(b, a)
+    // пока ждали ответ, выбор мог смениться — принимаем только актуальную пару
+    if (beforeId.value === b && afterId.value === a) pair.value = result
   } catch (e) {
+    if (beforeId.value !== b || afterId.value !== a) return
     pair.value = null
     pairError.value = e instanceof ApiError ? e.message : 'не удалось получить сравнение прогонов'
   }
 })
 
-const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : EMPTY_VIEW))
-const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : EMPTY_VIEW))
-const hasPair = computed(() => !!pair.value)
+const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : viewOf(releaseBefore)))
+const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : viewOf(releaseAfter)))
+const isSaved = computed(() => !pair.value)
 
 const types = computed<string[]>(() => {
-  if (!pair.value) return []
   const both = new Set([...Object.keys(before.value.byType), ...Object.keys(after.value.byType)])
   return [...both].sort()
 })
@@ -235,6 +220,7 @@ function downloadCurrent() {
       </div>
 
       <div class="pair">
+        <span v-if="isSaved" class="badge badge--warn">замер релиза</span>
         <label class="field pair__field">
           <span class="field__label">датасет</span>
           <select v-model="datasetId" class="select">
@@ -252,13 +238,11 @@ function downloadCurrent() {
     <p v-if="pairError" class="dash__note dash__note--bad">
       <AppIcon name="alert" size="sm" /> {{ pairError }}
     </p>
-    <p v-else-if="!hasPair" class="dash__note">
+    <p v-else-if="isSaved" class="dash__note">
       <AppIcon name="alert" size="sm" />
-      <template v-if="datasetId">
-        Для датасета «{{ currentDsName }}» пока нет готовой пары «было → стало». Запустите
-        «Прогнать «было → стало»» — пара появится здесь автоматически.
-      </template>
-      <template v-else>Датасет не выбран — загрузите архив и выберите его, чтобы увидеть сравнение.</template>
+      Показан сохранённый замер релиза от 8 ноября по 71 вопросу организатора. Своё сравнение «было →
+      стало» появится здесь, как только запустите «Прогнать «было → стало»» в блоке прогонов
+      <template v-if="datasetId"> для датасета «{{ currentDsName }}»</template>.
     </p>
 
     <div class="dash">
@@ -323,9 +307,7 @@ function downloadCurrent() {
           :legend-labels="lineLegend"
         />
         <p v-else class="panel__empty muted">
-          Разбивки по типам нет: прогон не оценён <span class="mono">check.py</span>. Он появляется,
-          когда в датасете есть <span class="mono">answers_public.json</span>, а на сервере —
-          <span class="mono">data/sample/check.py</span>.
+          Разбивка по типам доступна для прогонов с эталонными ответами.
         </p>
       </section>
 
@@ -358,7 +340,7 @@ function downloadCurrent() {
     </div>
 
     <div class="dash__foot">
-      <button class="btn btn--lg" type="button" :disabled="!afterId" @click="downloadCurrent">
+      <button class="btn btn--lg" type="button" :disabled="!pair" @click="downloadCurrent">
         <AppIcon name="download" size="sm" />
         Скачать ответы прогона
       </button>

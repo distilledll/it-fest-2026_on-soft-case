@@ -1,7 +1,7 @@
 """Прогон без сервера. Главное для дня защиты: распаковали архив → одна команда → answers.csv.
 
-python -m app.cli run --label baseline --pipeline baseline --no-guard          # «было» на примере
-python -m app.cli run --data /путь/к/архиву.zip --pipeline agent --out answers.csv  # контрольный набор
+python -m app.cli run --label direct --pipeline direct --no-guard          # «было» на примере
+python -m app.cli run --data /путь/к/архиву.zip --pipeline hybrid --out answers.csv  # контрольный набор
 python -m app.cli runs
 python -m app.cli models
 """

@@ -16,16 +16,18 @@ class Settings(BaseSettings):
 
     # Встроенный пример организатора (датасет "sample") и оценщик по умолчанию.
     sample_dir: Path = ROOT / "data" / "sample"
-    # check.py из архива датасета, если он там есть; иначе эталонный оценщик организатора из репозитория
+    # Установленный оценщик организатора, общий для всех наборов.
     checker: Path = BACKEND / "eval" / "check.py"
     # Всё, что меняется в рантайме: загруженные датасеты, прогоны, models.json.
     storage_dir: Path = ROOT / "storage"
 
-    pipeline: str = "baseline"
+    pipeline: str = "hybrid"
 
     # Профиль модели по умолчанию (создаётся при первом запуске, если models.json пуст).
     llm_base_url: str = ""
     llm_model: str = ""
+    llm_context_tokens: int | None = None
+    llm_max_tokens: int | None = None
     llm_api_key_env: str = "LLM_API_KEY"   # имя переменной с ключом, сам ключ — в .env
     llm_extra_headers: str = ""            # "User-Agent=Mozilla/5.0 ...;X-Foo=bar"
     # Эмбеддинги по умолчанию: свой адрес и ключ (пусто — те же, что у LLM)

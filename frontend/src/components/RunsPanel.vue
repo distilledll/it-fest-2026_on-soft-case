@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import { listDatasets } from '@/api/datasets'
 import { ApiError } from '@/api/http'
+import { answersCsvUrl } from '@/api/runs'
 import { getHealth } from '@/api/system'
 import { useDataset } from '@/composables/useDataset'
 import { useRuns } from '@/composables/useRuns'
@@ -34,6 +35,7 @@ const datasetId = ref('')
 const pipeline = ref('')
 const label = ref('')
 const guard = ref(true)
+watch(pipeline, (p) => { guard.value = p !== 'direct' && p !== 'baseline' })
 const busy = ref(false)
 const bothBusy = ref(false)
 const problem = ref('')
@@ -301,6 +303,7 @@ onBeforeUnmount(() => clearInterval(tick))
           <span v-if="r.llm_calls !== undefined">{{ r.llm_calls }} запросов к модели</span>
           <span v-if="r.elapsed_s !== undefined">{{ r.elapsed_s }} с</span>
           <span>{{ shortTime(r.created_at) }}</span>
+          <a v-if="r.status === 'done'" :href="answersCsvUrl(r.run_id)" download>Скачать answers.csv</a>
         </div>
 
         <div v-if="r.status === 'running'" class="progress runs__bar">

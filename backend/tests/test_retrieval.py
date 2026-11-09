@@ -76,7 +76,7 @@ def test_research_before_absent_in_fragment_mode(monkeypatch):
     retrieval._indexes.clear()
     ctx = Context(models=CTX.models, options={"llm_critic": False, "strategy": "full"})
     a = asyncio.run(AgentPipeline().answer(Question(id="x", package="T", question="Срок гарантии?"), BIG, ctx))
-    assert a.status == Status.ANSWER and a.answer == "30"
+    assert a.status == Status.UNKNOWN and any(t.node == "coverage" for t in a.trace)
     assert "research" in [t.node for t in a.trace] and a.llm_calls == 3
 
 

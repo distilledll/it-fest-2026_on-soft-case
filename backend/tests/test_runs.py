@@ -48,7 +48,7 @@ def test_retry_round_waits_for_api(monkeypatch):
         return False
     monkeypatch.setattr(llm, "wait_ready", down)
     p = Flaky({"Q1": 1})
-    monkeypatch.setattr(runs, "get_pipeline", lambda name: p)
+    monkeypatch.setattr(runs, "get_pipeline", lambda name, **kwargs: p)
     monkeypatch.setattr(runs, "make_context", lambda *a, **k: runs.Context(models={"answer": llm.ModelProfile(id="m", name="m", base_url="http://x", model="m")}, options={}))
     meta = asyncio.run(runs.run_set(make_dataset(2), "flaky", use_guard=False))
     # API не поднялся — раунд не тратим впустую, вопрос остаётся «упавшим» для resume
@@ -58,14 +58,14 @@ def test_retry_round_waits_for_api(monkeypatch):
 def test_failed_questions_are_retried(monkeypatch):
     monkeypatch.setattr(settings, "retry_pauses_s", [0, 0])
     p = Flaky({"Q1": 1, "Q2": 2})
-    monkeypatch.setattr(runs, "get_pipeline", lambda name: p)
+    monkeypatch.setattr(runs, "get_pipeline", lambda name, **kwargs: p)
     meta = asyncio.run(runs.run_set(make_dataset(), "flaky", use_guard=False))
     assert meta["failed"] == 0 and p.seen == {"Q0": 1, "Q1": 2, "Q2": 3, "Q3": 1}
 
 
 def test_still_failed_reported(monkeypatch):
     monkeypatch.setattr(settings, "retry_pauses_s", [0])
-    monkeypatch.setattr(runs, "get_pipeline", lambda name: Flaky({"Q0": 99}))
+    monkeypatch.setattr(runs, "get_pipeline", lambda name, **kwargs: Flaky({"Q0": 99}))
     meta = asyncio.run(runs.run_set(make_dataset(2), "flaky", use_guard=False))
     assert meta["failed"] == 1
 
@@ -73,7 +73,7 @@ def test_still_failed_reported(monkeypatch):
 def test_resume_after_crash(monkeypatch):
     monkeypatch.setattr(settings, "retry_pauses_s", [])
     did = make_dataset(4)
-    monkeypatch.setattr(runs, "get_pipeline", lambda name: Flaky({"Q3": 99}))
+    monkeypatch.setattr(runs, "get_pipeline", lambda name, **kwargs: Flaky({"Q3": 99}))
     meta = asyncio.run(runs.run_set(did, "flaky", use_guard=False))
     out = settings.runs_dir / meta["run_id"]
     # имитация падения процесса: остались только 2 ответа в partial, итоговых файлов нет
@@ -81,7 +81,7 @@ def test_resume_after_crash(monkeypatch):
     (out / "partial.jsonl").write_text("\n".join(lines) + "\n")
     (out / "trace.jsonl").unlink()
     p = Flaky({})
-    monkeypatch.setattr(runs, "get_pipeline", lambda name: p)
+    monkeypatch.setattr(runs, "get_pipeline", lambda name, **kwargs: p)
     meta = asyncio.run(runs.resume_run(meta["run_id"]))
     assert meta["failed"] == 0 and meta["resumed"] == 2 and len(p.seen) == 2
     ids = [json.loads(x)["id"] for x in (out / "trace.jsonl").read_text().splitlines()]

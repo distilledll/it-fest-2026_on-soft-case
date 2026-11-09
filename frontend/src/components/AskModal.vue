@@ -19,6 +19,16 @@ const packageId = ref('')
 const question = ref('')
 const pipeline = ref<'baseline' | 'agent'>('baseline')
 const asking = ref(false)
+/** Все цитаты-основания ответа: evidence + основной quote, если его там нет. */
+const sources = computed(() => {
+  const result = view.value.answer
+  if (!result?.quote) return []
+  const all = [...(result.evidence ?? [])]
+  if (!all.some((s) => s.file === result.file && s.quote === result.quote)) {
+    all.unshift({ file: result.file, quote: result.quote, value: '' })
+  }
+  return all
+})
 
 type Mode = 'baseline' | 'agent'
 
@@ -250,9 +260,10 @@ onUnmounted(() => {
               </span>
             </div>
             <p class="answer__value">{{ view.answer.answer }}</p>
-            <blockquote v-if="view.answer.quote" class="answer__quote">
-              «{{ view.answer.quote }}»
-              <cite v-if="view.answer.file" class="answer__file mono">{{ packageId }}/{{ view.answer.file }}</cite>
+            <blockquote v-for="(source, i) in sources" :key="i" class="answer__quote">
+              <strong v-if="sources.length > 1 && source.value && source.quote.includes(source.value)">{{ source.value }}<br></strong>
+              «{{ source.quote }}»
+              <cite v-if="source.file" class="answer__file mono">{{ packageId }}/{{ source.file }}</cite>
             </blockquote>
           </div>
         </transition>

@@ -5,7 +5,7 @@
 ```bash
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev,agent]"
-cp .env.example .env                      # LLM_BASE_URL / LLM_MODEL / LLM_API_KEY
+cp .env.example .env                      # заполнить BRIDGE_API_KEY
 .venv/bin/uvicorn app.main:app --reload   # http://localhost:8000/docs
 .venv/bin/pytest -q
 ```
@@ -15,9 +15,9 @@ cp .env.example .env                      # LLM_BASE_URL / LLM_MODEL / LLM_API_K
 ### CLI
 
 ```bash
-python -m app.cli run --pipeline baseline --no-guard --label "было"     # точка «было» на примере
-python -m app.cli run --pipeline agent --label "стало: критики"         # «стало»
-python -m app.cli run --data /путь/к/контрольному.zip --pipeline agent --out answers.csv   # день защиты
+python -m app.cli run --pipeline direct --no-guard --label "было"     # точка «было» на примере
+python -m app.cli run --pipeline hybrid --label "стало: агент + TrustQA"         # «стало»
+python -m app.cli run --data /путь/к/контрольному.zip --pipeline hybrid --out answers.csv   # день защиты
 python -m app.cli run ... --role answer=<profile> --role critic=<profile>                   # другие модели
 python -m app.cli runs      # история прогонов с индексом доверия
 python -m app.cli models    # профили моделей и роли
@@ -53,7 +53,7 @@ storage/             (в корне репо, в .gitignore) datasets/, runs/, m
 
 Профиль — это подключение: `base_url`, `model`, ключ, `extra_headers`, `temperature`, `max_tokens`,
 `disable_thinking`, `extra_body`. Роль указывает, какой профиль для чего используется:
-`answer`, `critic`, `embed`, `rerank`. Если для роли профиль не назначен, берётся профиль `answer`.
+`answer`, `critic`, `embed`, `rerank`. Сохранённый профиль `answer` применяется и в резервном проходе гибрида. Для поиска TrustQA берёт назначенные профили `embed` и `rerank`, а при отсутствии назначения — соответствующие параметры `JINA_*`.
 
 - Ключ лучше хранить в `.env` и указывать в профиле имя переменной (`api_key_env`).
   Ключ, сохранённый через API, лежит в `storage/models.json` и наружу не отдаётся (`has_key: true/false`).
@@ -68,7 +68,7 @@ storage/             (в корне репо, в .gitignore) datasets/, runs/, m
 
 - Модели: `cifra48/llm` и `cifra48/agent` — это одна и та же модель (`llm` ведёт на `agent`), плюс `cifra48/embedding`.
   Сравнивать их между собой бессмысленно; варьировать можно `reasoning_effort` (low/medium/high).
-  Контекст 262k токенов: закупка целиком влезает с запасом. Реранкера в шлюзе нет.
+  Окно задают в профиле модели. Для поиска TrustQA шаблон окружения задаёт нативный эндпоинт реранка.
 - Авторизация: `Authorization: Bearer <ключ>` или `X-API-Key`, OpenAI SDK работает как есть.
 - WAF отвечает 403 на дефолтный User-Agent. В профиле нужен `extra_headers: User-Agent=Mozilla/5.0 ...`.
 - **Параллельность задаётся по лимиту ключа** (`LLM_CONCURRENCY`, `--concurrency N`) и влияет только на скорость.
@@ -86,7 +86,7 @@ storage/             (в корне репо, в .gitignore) datasets/, runs/, m
 ### Стратегия агента
 
 `options.strategy` (в запросе, прогоне или `agent_options` профиля):
-- `auto` (по умолчанию) — закупка влезает в контекст: модель читает её целиком; не влезает — узел `map`
+- `auto` (по умолчанию) — закупка влезает в контекст (бюджет: `context_tokens` профиля × 3 × 0,5 символов, без него 60 000): модель читает её целиком; не влезает — узел `map`
   (map-reduce): модель читает закупку фрагментами по ~4000 символов, выписывает дословные цитаты,
   код их проверяет (есть ли в документах, не старая ли редакция), ответ — только по ним. Читается вся
   закупка, если фрагментов не больше `map_max_chunks` (30, ~120k символов); иначе — изменения извещения,
@@ -100,8 +100,7 @@ map-reduce — 100, 738 запросов, ~6 мин при 2 запросах/с
 
 ### Оценка
 
-`check.py` из архива датасета, если он там есть; иначе эталонный `eval/check.py` (пример организатора).
-Чем оценён прогон — `meta.score.checker`. Внимание: `check.py` из архива — это код, который сервер выполняет.
+Все наборы оценивает установленный `backend/eval/check.py` организатора. Источник указан в `meta.score.checker`.
 
 ## Агент
 

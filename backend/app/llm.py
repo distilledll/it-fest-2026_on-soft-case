@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, PrivateAttr, model_validator
 
 from app.config import settings
 
@@ -27,6 +27,7 @@ ROLES = ("answer", "critic", "embed", "rerank")
 
 
 class ModelProfile(BaseModel):
+    _from_env: bool = PrivateAttr(default=False)
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
     name: str
     base_url: str
@@ -36,8 +37,8 @@ class ModelProfile(BaseModel):
     extra_headers: str = ""          # "User-Agent=...;X-Foo=bar" — шлюз может резать дефолтный UA SDK
     temperature: float = 0.0         # для честного «было/стало» — 0
     max_tokens: int | None = None
-    concurrency: int = 4          # потолок одновременных запросов этого профиля; общий env-лимит всё равно сильнее
-    context_window: int = 32768   # справка: сколько токенов модель видит; в UI настроек
+    context_tokens: int | None = Field(default=None, validation_alias=AliasChoices("context_tokens", "context_window"), ge=512, le=4_000_000)
+    concurrency: int = Field(default=5, ge=1, le=64)
     # По умолчанию рассуждения выключены (chat_template_kwargs.enable_thinking=false — vLLM/SGLang, Qwen3):
     # так советуют организаторы, ответ ~2 с вместо 20–40 с, точность агент добирает проверками.
     # Для API, которые не знают этого поля (напр. OpenAI), ставьте false.
@@ -66,6 +67,7 @@ class ModelProfile(BaseModel):
 
     def public(self) -> dict:
         d = self.model_dump(exclude={"api_key"})
+        d["context_window"] = self.context_tokens
         d["has_key"] = bool(self.resolve_key())
         return d
 
@@ -74,7 +76,8 @@ class ModelProfile(BaseModel):
 
     def headers(self) -> dict[str, str]:
         out = {}
-        for part in re.split(r"[;\n]", self.extra_headers or ""):
+        # Точка с запятой в User-Agent/Cookie может быть частью самого значения.
+        for part in re.split(r"[\r\n]+|;\s*(?=[A-Za-z0-9-]+\s*=)", self.extra_headers or ""):
             if "=" in part:
                 k, v = part.split("=", 1)
                 out[k.strip()] = v.strip()
@@ -85,16 +88,12 @@ class ModelProfile(BaseModel):
         Новый клиент на каждый запрос — это новое TCP+TLS-соединение на каждый вызов модели: сотни
         соединений в минуту с одного IP, и защита шлюза от DDoS блокирует IP на несколько минут."""
         loop = asyncio.get_running_loop()
-        key = (id(loop), self.base_url, self.resolve_key(), self.extra_headers)
+        key = (loop, self.base_url, self.resolve_key(), self.extra_headers)
         c = _clients.get(key)
         if c is None:
-            n = max(settings.llm_concurrency, 1)
-            http = httpx.AsyncClient(limits=httpx.Limits(max_connections=n, max_keepalive_connections=n,
-                                                         keepalive_expiry=60),
-                                     timeout=settings.llm_timeout_s)
             c = AsyncOpenAI(base_url=self.base_url, api_key=self.resolve_key() or "none",
                             default_headers=self.headers(), timeout=settings.llm_timeout_s, max_retries=0,
-                            http_client=http)
+                            http_client=http_client())
             _clients[key] = c
         return c
 
@@ -125,7 +124,9 @@ def load() -> Registry:
     if settings.llm_base_url and settings.llm_model:
         prof = ModelProfile(id="default", name="По умолчанию (.env)", base_url=settings.llm_base_url,
                             model=settings.llm_model, api_key_env=settings.llm_api_key_env,
-                            extra_headers=settings.llm_extra_headers)
+                            extra_headers=settings.llm_extra_headers, context_tokens=settings.llm_context_tokens,
+                            max_tokens=settings.llm_max_tokens)
+        prof._from_env = True
         reg.profiles.append(prof)
         reg.roles = {"answer": "default", "critic": "default"}
     if settings.embed_model:
@@ -181,6 +182,30 @@ _clients: dict[tuple, AsyncOpenAI] = {}
 _rate = {"next": 0.0}
 
 
+_http_clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
+
+
+def http_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    if loop not in _http_clients:
+        n = max(settings.llm_concurrency, 1)
+        _http_clients[loop] = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=n, max_keepalive_connections=n, keepalive_expiry=60),
+            timeout=settings.llm_timeout_s)
+    return _http_clients[loop]
+
+
+async def close_clients():
+    loop = asyncio.get_running_loop()
+    for key in [key for key in _clients if key[0] is loop]:
+        del _clients[key]
+    if client := _http_clients.pop(loop, None):
+        await client.aclose()
+    _slots.pop(id(loop), None)
+    for key in [key for key in _pslots if key[0] == id(loop)]:
+        del _pslots[key]
+
+
 async def _throttle() -> None:
     """Не чаще llm_rps запросов в секунду на весь процесс (0 — без ограничения)."""
     if settings.llm_rps <= 0:
@@ -224,10 +249,13 @@ async def call(fn, *args, profile: ModelProfile | None = None, **kw):
             await asyncio.sleep(pause)
             waited += pause
         async with AsyncExitStack() as gate:
-            await gate.enter_async_context(_slot())
             if profile is not None:
                 await gate.enter_async_context(_profile_slot(profile))   # личный лимит профиля
+            await gate.enter_async_context(_slot())
             await _throttle()
+            # Пока запрос ждал слот или свою очередь, сосед мог объявить общую паузу.
+            if _outage["until"] > _now():
+                continue
             try:
                 result = await fn(*args, **kw)
                 _outage["delay"] = 5.0
@@ -238,6 +266,12 @@ async def call(fn, *args, profile: ModelProfile | None = None, **kw):
                     raise
                 m = RETRY_AFTER_RE.search(str(e))
                 wait = float(m.group(1)) + 0.5 if m else delay
+                retry_after = e.response.headers.get("retry-after", "")
+                try:
+                    wait = max(wait, float(retry_after))
+                except ValueError:
+                    pass
+                _outage["until"] = max(_outage["until"], _now() + wait)
                 delay = min(delay * 2, 30)
                 log.warning("LLM 429, повтор %d через %.1f с", rate_limits, wait)
             except APITimeoutError:

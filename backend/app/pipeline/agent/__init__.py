@@ -1,6 +1,7 @@
 """LangGraph-агент: контекст → ответ → узкие критики кодом → критик-модель → исправление → «не знаю»."""
 from app.pipeline.base import Context, collect
-from app.schemas import Answer, Document, Question, Status
+from app.schemas import Answer, Document, Evidence, Question, Status
+from app.verify import quote_exists
 
 
 class AgentPipeline:
@@ -10,6 +11,7 @@ class AgentPipeline:
         return await collect(self.stream(q, docs, ctx))
 
     async def stream(self, q: Question, docs: list[Document], ctx: Context):
+        from app.pipeline.agent.critics import parse_amendments, superseded_by
         from app.pipeline.agent.graph import GRAPH
 
         config = {"configurable": {"docs": docs, "ctx": ctx}, "recursion_limit": 40}
@@ -25,5 +27,14 @@ class AgentPipeline:
         if d is None:
             yield Answer(id=q.id, status=Status.UNKNOWN, llm_calls=state.get("llm_calls", 0))
             return
-        yield Answer(id=q.id, status=Status(d.status), answer=d.answer, quote=d.quote, file=d.file,
+        evidence = []
+        if d.status in (Status.ANSWER, Status.CONFLICT):
+            amendments = parse_amendments(docs)
+            for item in d.evidence:
+                if (item.get("file") and quote_exists(item["quote"], docs, item["file"])
+                        and not superseded_by(item["quote"], item["file"], amendments)):
+                    source = Evidence.model_validate(item)
+                    if source not in evidence:
+                        evidence.append(source)
+        yield Answer(id=q.id, evidence=evidence, status=Status(d.status), answer=d.answer, quote=d.quote, file=d.file,
                      llm_calls=state.get("llm_calls", 0))

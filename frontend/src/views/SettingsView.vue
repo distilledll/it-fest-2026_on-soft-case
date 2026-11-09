@@ -32,7 +32,7 @@ const ROLE_LABEL: Record<RoleName, string> = {
 }
 
 const ROLE_HINT: Record<RoleName, string> = {
-  answer: 'модель, которая отвечает на вопрос',
+  answer: 'модель для ответа агента и резервной проверки TrustQA',
   critic: 'критик-модель и перепроверка ответа',
   embed: 'эмбеддинги для поиска фрагментов (POST /embeddings)',
   rerank: 'модельная пересортировка фрагментов (опция пайплайна rerank)',
@@ -93,7 +93,7 @@ const asDraft = (p: ModelProfilePublic): Draft => ({
   temperature: p.temperature,
   maxTokens: p.max_tokens,
   concurrency: p.concurrency,
-  contextWindow: p.context_window,
+  contextWindow: p.context_window ?? 40000,
   noThinking: p.disable_thinking,
   jsonMode: p.json_mode,
   reasoning: p.reasoning_effort ?? '',
@@ -111,7 +111,7 @@ function patchOf(p: ModelProfilePublic): ProfilePatch {
   if (d.temperature !== p.temperature) out.temperature = d.temperature
   if (d.maxTokens !== p.max_tokens) out.max_tokens = d.maxTokens
   if (d.concurrency !== p.concurrency) out.concurrency = d.concurrency
-  if (d.contextWindow !== p.context_window) out.context_window = d.contextWindow
+  if (d.contextWindow !== (p.context_window ?? 40000)) out.context_window = d.contextWindow
   if (d.noThinking !== p.disable_thinking) out.disable_thinking = d.noThinking
   if (d.jsonMode !== p.json_mode) out.json_mode = d.jsonMode
   if (d.reasoning.trim() !== (p.reasoning_effort ?? '')) out.reasoning_effort = d.reasoning.trim()
@@ -737,7 +737,7 @@ onMounted(load)
           </label>
           <p class="types__note muted">
             <AppIcon name="alert" size="sm" />
-            Отдельного реранкера в шлюзе нет: пайплайн пересортирует фрагменты чат-запросом этой модели.
+            Выбранный профиль оценивает фрагменты чат-запросом в обоих проходах. Без назначения TrustQA использует реранкер из JINA_* на сервере.
           </p>
         </AccordionItem>
       </div>

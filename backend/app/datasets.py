@@ -17,7 +17,6 @@ from pathlib import Path, PurePosixPath
 from app.config import settings
 
 ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
-SAFE_NAME = re.compile(r"[^\w.\-]+", re.UNICODE)
 MAX_FILES = 5000
 
 
@@ -39,10 +38,7 @@ def path_of(dataset_id: str) -> Path:
 
 
 def checker_for(data_dir: Path) -> tuple[Path, str]:
-    """Чем оценивать прогон: check.py из архива (если его положили) или эталонный из репозитория."""
-    own = data_dir / "check.py"
-    if own.is_file():
-        return own, "из архива"
+    """Все наборы оцениваются установленным оценщиком организатора."""
     return settings.checker, "эталонный (backend/eval/check.py)"
 
 
@@ -106,6 +102,8 @@ def from_zip(data: bytes, name: str) -> str:
         if (i.external_attr >> 16) & 0o170000 == 0o120000:  # симлинк
             continue
         if parts := _safe_parts(i.filename):
+            if parts in files:
+                raise DatasetError(f"повторяющийся путь в архиве: {i.filename}")
             files[parts] = i
 
     # Корень — каталог, где лежит packages/ (в архиве организатора он вложен в папку).
@@ -113,12 +111,16 @@ def from_zip(data: bytes, name: str) -> str:
     did, dest = _new_dir(name)
     try:
         if roots:
-            root = min(roots, key=len)
+            if len(roots) != 1:
+                raise DatasetError("в архиве несколько каталогов packages; загрузите один набор")
+            root = roots.pop()
             for parts, i in files.items():
+                if parts[:len(root)] != root:
+                    continue
                 rel = parts[len(root):]
                 if rel[:1] == ("packages",) and len(rel) == 3 and rel[2].lower().endswith(".txt"):
                     _write(dest / "packages" / rel[1] / rel[2], zf.read(i))
-                elif len(rel) == 1 and rel[0] in ("questions.csv", "answers_public.json", "check.py"):
+                elif len(rel) == 1 and rel[0] in ("questions.csv", "answers_public.json"):
                     _write(dest / rel[0], zf.read(i))
         else:
             # Произвольный архив: папка с txt = закупка, txt в корне = закупка "P01".
@@ -137,26 +139,33 @@ def from_zip(data: bytes, name: str) -> str:
 
 def from_files(files: list[tuple[str, bytes]], name: str, package: str = "P01") -> str:
     """Загрузка отдельных .txt — одна закупка, вопросы будут строкой ввода."""
+    if not package or PurePosixPath(package).name != package or package in (".", "..") or "\\" in package:
+        raise DatasetError("имя закупки должно быть именем одной папки")
     did, dest = _new_dir(name)
-    for fname, data in files:
-        if fname.lower().endswith(".txt"):
-            _write(dest / "packages" / package / _clean(fname), data)
-        elif fname in ("questions.csv", "answers_public.json", "check.py"):
-            _write(dest / fname, data)
-    if not (dest / "packages").exists():
-        shutil.rmtree(dest)
-        raise DatasetError("нужен хотя бы один .txt")
+    try:
+        for fname, data in files:
+            if fname.lower().endswith(".txt"):
+                basename = PurePosixPath(fname.replace("\\", "/")).name
+                _write(dest / "packages" / package / basename, data)
+            elif fname in ("questions.csv", "answers_public.json"):
+                _write(dest / fname, data)
+        if not (dest / "packages").exists():
+            raise DatasetError("нужен хотя бы один .txt")
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     return did
 
 
-def _clean(name: str) -> str:
-    return SAFE_NAME.sub("_", PurePosixPath(name.replace("\\", "/")).name)[:120] or "file.txt"
-
-
 def _write(path: Path, data: bytes) -> None:
-    path = path.parent / _clean(path.name)
+    if any(ord(c) < 32 for c in path.name):
+        raise DatasetError("недопустимый управляющий символ в имени файла")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    try:
+        with path.open("xb") as stream:
+            stream.write(data)
+    except FileExistsError as exc:
+        raise DatasetError(f"повторяющееся имя файла в закупке: {path.name}") from exc
 
 
 def subset(dataset_id: str, ids: list[str], name: str) -> str:
@@ -168,6 +177,10 @@ def subset(dataset_id: str, ids: list[str], name: str) -> str:
     did, dest = _new_dir(name)
     with open(src / "questions.csv", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f, delimiter=";") if r["id"] in want]
+    available = set(info(dataset_id)["packages"])
+    if any(row["package"] not in available for row in rows):
+        shutil.rmtree(dest)
+        raise DatasetError("неизвестная закупка в questions.csv")
     if not rows:
         shutil.rmtree(dest)
         raise DatasetError("ни одного вопроса из списка нет в датасете")
@@ -178,8 +191,6 @@ def subset(dataset_id: str, ids: list[str], name: str) -> str:
     if (src / "answers_public.json").exists():
         gold = [g for g in json.loads((src / "answers_public.json").read_text(encoding="utf-8")) if g["id"] in want]
         (dest / "answers_public.json").write_text(json.dumps(gold, ensure_ascii=False, indent=1), encoding="utf-8")
-    if (src / "check.py").is_file():                 # поднабор оценивается тем же check.py, что и исходный
-        shutil.copy2(src / "check.py", dest / "check.py")
     for pkg in sorted({r["package"] for r in rows}):
         shutil.copytree(src / "packages" / pkg, dest / "packages" / pkg)
     return did
