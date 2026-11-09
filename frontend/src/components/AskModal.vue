@@ -17,6 +17,7 @@ const datasets = ref<DatasetInfo[]>([])
 const datasetId = ref('')
 const packageId = ref('')
 const question = ref('')
+const pipeline = ref<'baseline' | 'agent'>('baseline')
 const asking = ref(false)
 const answer = ref<Answer | null>(null)
 const steps = ref<TraceStep[]>([])
@@ -49,7 +50,13 @@ async function ask() {
   controller = new AbortController()
   try {
     await askStream(
-      { dataset: datasetId.value, package: packageId.value, question: question.value.trim(), guard: true },
+      {
+        dataset: datasetId.value,
+        package: packageId.value,
+        question: question.value.trim(),
+        pipeline: pipeline.value,
+        guard: true,
+      },
       {
         onStep: (s) => steps.value.push(s),
         onAnswer: (a) => {
@@ -88,6 +95,7 @@ watch(open, async (v) => {
   if (v) {
     window.addEventListener('keydown', onKey)
     reset()
+    pipeline.value = 'baseline'
     question.value = preset.value
     try {
       datasets.value = await listDatasets()
@@ -157,6 +165,28 @@ onUnmounted(() => {
           </label>
 
           <div class="ask__actions">
+            <div class="ask__mode" role="group" aria-label="Кем отвечать">
+              <button
+                type="button"
+                class="ask__mode-btn"
+                :class="{ 'is-on': pipeline === 'baseline' }"
+                :aria-pressed="pipeline === 'baseline'"
+                :disabled="asking"
+                @click="pipeline = 'baseline'"
+              >
+                было · baseline
+              </button>
+              <button
+                type="button"
+                class="ask__mode-btn"
+                :class="{ 'is-on': pipeline === 'agent' }"
+                :aria-pressed="pipeline === 'agent'"
+                :disabled="asking"
+                @click="pipeline = 'agent'"
+              >
+                стало · агент
+              </button>
+            </div>
             <button class="btn btn--primary" type="submit" :disabled="!canAsk">
               <span v-if="asking" class="ask__spin" />
               <AppIcon v-else name="message" size="sm" />
@@ -233,7 +263,41 @@ onUnmounted(() => {
 
 .ask__actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.ask__mode {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+}
+
+.ask__mode-btn {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background var(--t) var(--ease), color var(--t) var(--ease);
+}
+
+.ask__mode-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ask__mode-btn.is-on {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 .ask__spin {
