@@ -90,14 +90,16 @@ def nearby(quote: str, docs: list[Document], file: str = "", width: int = 250) -
     return q
 
 
-def guard(ans: Answer, docs: list[Document], question: str = "") -> Answer:
-    """Финальные правила. Если проверка не прошла и починить нельзя — честное «не знаю»."""
+def guard(ans: Answer, docs: list[Document], question: str = "", quote_only: bool = False) -> Answer:
+    """Финальные правила. Если проверка не прошла и починить нельзя — честное «не знаю».
+    quote_only=True — для движков, которые сами проверяют числа и расчёт кодом: цитата должна быть
+    дословной (без подтягивания к похожему тексту — тот мог бы содержать другое число), числа не сверяем."""
     if ans.status in (Status.ABSENT, Status.UNKNOWN):
         return ans.model_copy(update={"answer": "", "quote": "", "file": ""})
 
     doc = quote_exists(ans.quote, docs)
     if doc is None:
-        snapped = snap_quote(ans.quote, docs)
+        snapped = None if quote_only else snap_quote(ans.quote, docs)
         if snapped:
             ans.trace.append(TraceStep(node="guard_quote", ok=True, message="цитата поправлена до дословной",
                                        data={"was": ans.quote, "now": snapped[0]}))
@@ -112,7 +114,7 @@ def guard(ans: Answer, docs: list[Document], question: str = "") -> Answer:
     # Число из ответа должно встречаться в цитате — кроме вопросов-расчётов («сколько рублей составит»).
     is_calc = "составит" in question.lower()
     a_nums, q_nums = numbers(ans.answer), number_pool(nearby(ans.quote, docs, ans.file))
-    if a_nums and not is_calc and ans.status == Status.ANSWER:
+    if not quote_only and a_nums and not is_calc and ans.status == Status.ANSWER:
         if not any(abs(a - q) < 0.01 for a in a_nums for q in q_nums):
             ans.trace.append(TraceStep(node="guard_number", ok=False, message="числа из ответа нет рядом с цитатой",
                                        data={"answer": a_nums, "quote": q_nums}))

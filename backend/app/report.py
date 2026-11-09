@@ -33,6 +33,12 @@ def _model_label(models: dict | None) -> str:
     return f"{ans.get('model', '?')} ({ans.get('profile', '?')})"
 
 
+def _last(lad: dict) -> dict:
+    """Итоговый шаг лесенки — последний посчитанный (hybrid, если он есть, иначе полный агент)."""
+    done = [s for s in lad["steps"] if s.get("index") is not None]
+    return done[-1] if done else {}
+
+
 def build() -> str:
     ladders = [l for l in list_ladders() if all(s["status"] == "done" for s in l["steps"])]
     latest: dict[tuple, dict] = {}
@@ -47,21 +53,28 @@ def build() -> str:
     out.append("\nСравнение «было/стало» — всегда на одной модели, `temperature = 0`.\n")
 
     out.append("## Было → стало\n")
-    out.append("Шаги: **baseline** — модель «как есть», один запрос со всей закупкой; **промпт** — постановка задачи "
-               "агента (статусы «нет в документах»/«не знаю», правила про изменения, расхождения, расчёты); "
-               "**критики** — проверки кодом и повторы; **полный** — плюс критик-модель. Если закупка не влезает "
+    out.append("Шаги: **baseline** — модель «как есть», один запрос со всей закупкой; **«не знаю»** — тот же запрос, "
+               "но разрешены статусы «нет в документах»/«не знаю» (`direct`); **промпт** — постановка задачи "
+               "агента (правила про изменения, расхождения, расчёты); **критики** — проверки кодом и повторы; "
+               "**полный** — плюс критик-модель; **hybrid** — плюс резервный проход TrustQA, если агент сказал "
+               "«не знаю». Каждый шаг добавляет одно изменение к предыдущему. Если закупка не влезает "
                "в контекст модели, агент на всех шагах читает её фрагментами (узел `map`, map-reduce): всю, если "
                "фрагментов не больше 30, иначе — изменения извещения, лучший фрагмент каждого файла и остальные "
                "по поиску. Baseline — один запрос на каждый вопрос со всей закупкой.\n")
-    out.append("| Набор | Модель (профиль) | Дата | Baseline | Промпт | + критики | Полный агент | Обманов: было → стало | Запросов / время (полный) |")
-    out.append("|---|---|---|---|---|---|---|---|---|")
+    cols = [("baseline", "Baseline"), ("direct", "+ «не знаю»"), ("prompt", "Промпт"), ("critics", "+ критики"),
+            ("full", "Полный агент"), ("hybrid", "+ TrustQA")]
+    out.append("| Набор | Модель (профиль) | Дата | " + " | ".join(c[1] for c in cols)
+               + " | Обманов: было → стало | Запросов / время (итог) |")
+    out.append("|" + "---|" * (len(cols) + 5))
     for (ds, model), lad in sorted(latest.items(), key=lambda x: (x[0][1], x[0][0] or "")):
         st = {s["step"]: s for s in lad["steps"]}
-        cell = lambda k: f"{st[k]['index']}" if k in st else "—"
-        b, f = st.get("baseline", {}), st.get("full", {})
+        last = _last(lad)
+        cell = lambda k: (f"**{st[k]['index']}**" if st[k] is last else f"{st[k]['index']}") if k in st else "—"
+        b = st.get("baseline", {})
         date = (lad["id"][:4][2:] + "." + lad["id"][:2]) if lad.get("id") else "—"
-        out.append(f"| {ds} | `{model}` | {date} | {cell('baseline')} | {cell('prompt')} | {cell('critics')} | **{cell('full')}** | "
-                   f"{b.get('lies', '—')} → {f.get('lies', '—')} | {f.get('llm_calls', '—')} / {f.get('elapsed_s', '—')} с |")
+        out.append(f"| {ds} | `{model}` | {date} | " + " | ".join(cell(k) for k, _ in cols)
+                   + f" | {b.get('lies', '—')} → {last.get('lies', '—')} | {last.get('llm_calls', '—')} / "
+                     f"{last.get('elapsed_s', '—')} с |")
     out.append("\nИндекс доверия = (верных − обманов) / всех × 100. «Не знаю» — 0 баллов. Профиль `llm` — "
                "с рассуждениями, `llm-fast` — без (по умолчанию). `qwen7b` — локальная Qwen 2.5 7B, прогон до части "
                "исправлений: проверка, что агент помогает и слабой модели.\n")
@@ -87,14 +100,14 @@ def build() -> str:
     out.append("\nВремя — при 5 одновременных запросах и не больше 2 запросов в секунду; часть прогонов попала "
                "на обрывы связи со шлюзом и шла дольше (так, hard).\n")
 
-    out.append("## Разбивка по типам вопросов (полный агент)\n")
+    out.append("## Разбивка по типам вопросов (итоговый шаг лесенки)\n")
     for (ds, model), lad in sorted(latest.items(), key=lambda x: (x[0][1], x[0][0] or "")):
-        full = next((s for s in lad["steps"] if s["step"] == "full"), None)
+        full = _last(lad)
         base = next((s for s in lad["steps"] if s["step"] == "baseline"), None)
         if not full or not full.get("by_type"):
             continue
         out.append(f"**{ds}, `{model}`**\n")
-        out.append("| Тип вопроса | Baseline: верно / обман | Агент: верно / не знаю / обман |")
+        out.append(f"| Тип вопроса | Baseline: верно / обман | {full['title']}: верно / не знаю / обман |")
         out.append("|---|---|---|")
         for t, v in sorted(full["by_type"].items()):
             bv = (base or {}).get("by_type", {}).get(t, {})
@@ -113,11 +126,14 @@ def build() -> str:
     out.append("## Пойманные обманы (примеры)\n")
     shown = 0
     for (ds, model), lad in latest.items():
-        full = next((s for s in lad["steps"] if s["step"] == "full"), None)
-        if not full:
-            continue
-        r = analyze(full["run_id"])
-        for row in r["caught"][:3]:
+        rows, seen = [], set()
+        for s in lad["steps"]:                 # обман ловят проверки (critics) и критик-модель (full)
+            if s["step"] in ("critics", "full", "hybrid"):
+                for row in analyze(s["run_id"])["caught"]:
+                    if row["id"] not in seen:
+                        seen.add(row["id"])
+                        rows.append(row)
+        for row in rows[:3]:
             d, f = row["draft"], row["final"]
             msgs = [s["message"] if isinstance(s, dict) else s.message for s in row["steps"]
                     if (s["ok"] if isinstance(s, dict) else s.ok) is False][:2]

@@ -237,7 +237,7 @@ class LadderStepDef(Out):
 
 
 class LadderStep(Out):
-    step: str = Field(examples=["baseline"], description="baseline | prompt | critics | full")
+    step: str = Field(examples=["baseline"], description="baseline | direct | prompt | critics | full | hybrid")
     title: str = Field(examples=["Baseline «как есть»"])
     order: int
     run_id: str

@@ -82,7 +82,7 @@ def get_pipeline(name: str, *, use_guard: bool = False) -> Pipeline:
     mod, cls, _ = PIPELINES[name]
     factory = getattr(import_module(mod), cls)
     if name == "hybrid":
-        return factory(get_pipeline("agent", use_guard=use_guard))
+        return factory(get_pipeline("agent", use_guard=use_guard), use_guard=use_guard)
     pipeline = factory()
     return GuardedPipeline(pipeline) if use_guard else pipeline
 
