@@ -95,3 +95,22 @@ def test_request_errors_are_not_retried():
         node="error", ok=False, message="BadRequestError: Error code: 400 - The input is longer than the model's context")])
     net = Answer(id="y", status=Status.UNKNOWN, trace=[TraceStep(node="error", ok=False, message="APIConnectionError: x")])
     assert not runs.is_failed(too_long) and runs.is_failed(net)
+
+
+def test_answers_csv_matches_case_format(tmp_path):
+    """Формат кейса: заголовок id;status;answer;quote;file, «;», пустые поля у «нет в документах»/«не знаю»;
+    файл читается оригинальным check.py (BOM для Excel он срезает)."""
+    import importlib.util
+    a = [Answer(id="Q1", status=Status.ANSWER, answer="18000 руб.", quote="18 000,00\\nруб.", file="01.txt"),
+         Answer(id="Q2", status=Status.ABSENT, answer="нет в документах", quote="что-то", file="02.txt"),
+         Answer(id="Q3", status=Status.UNKNOWN, answer="не знаю", quote="", file="")]
+    p = tmp_path / "answers.csv"
+    runs.write_answers_csv(a, p)
+    lines = p.read_text(encoding="utf-8-sig").splitlines()
+    assert lines[0] == "id;status;answer;quote;file"
+    assert lines[2] == "Q2;нет в документах;;;" and lines[3] == "Q3;не знаю;;;"
+    spec = importlib.util.spec_from_file_location("chk", settings.checker)
+    chk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(chk)
+    rows = chk.load_answers(p)
+    assert set(rows) == {"Q1", "Q2", "Q3"} and rows["Q1"]["answer"] == "18000 руб." and rows["Q1"]["file"] == "01.txt"

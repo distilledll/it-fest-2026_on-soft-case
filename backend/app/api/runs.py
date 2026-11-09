@@ -78,7 +78,7 @@ def run_detail(run_id: str):
 
 @router.get("/{run_id}/answers.csv", response_class=FileResponse, responses={200: {"description": "answers.csv для сдачи: UTF-8, разделитель `;`, колонки id;status;answer;quote;file", "content": {"text/csv": {"schema": {"type": "string"}}}}})
 def run_csv(run_id: str):
-    return FileResponse(_dir(run_id) / "answers.csv", media_type="text/csv", filename="answers.csv")
+    return FileResponse(_dir(run_id) / "answers.csv", media_type="text/csv; charset=utf-8", filename="answers.csv")
 
 
 @router.get("/{run_id}/caught", response_model=out.CaughtOut)
