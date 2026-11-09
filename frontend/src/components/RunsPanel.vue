@@ -212,7 +212,7 @@ onBeforeUnmount(() => clearInterval(tick))
 
       <div class="runs__go">
         <button class="btn btn--primary" type="button" :disabled="!canStartBoth" @click="onStartBoth">
-          {{ bothBusy ? 'Запускаем…' : ladderRunning ? 'Идёт измерение…' : 'Прогнать «было → стало»' }}
+          {{ bothBusy ? 'Запускаем…' : ladderRunning ? 'Идёт проверка…' : 'Запустить проверку' }}
         </button>
         <span class="field__hint">
           Один запуск — два прогона по очереди на одном датасете: «как есть» и полный агент.
