@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 
 import AppIcon from '@/components/AppIcon.vue'
 import { askStream } from '@/api/ask'
@@ -19,61 +19,81 @@ const packageId = ref('')
 const question = ref('')
 const pipeline = ref<'baseline' | 'agent'>('baseline')
 const asking = ref(false)
-const answer = ref<Answer | null>(null)
-const steps = ref<TraceStep[]>([])
-const error = ref('')
 
-let controller: AbortController | null = null
+type Mode = 'baseline' | 'agent'
+
+interface AskView {
+  steps: TraceStep[]
+  answer: Answer | null
+  error: string
+  running: boolean
+}
+
+const emptyView = (): AskView => ({ steps: [], answer: null, error: '', running: false })
+const views = reactive<Record<Mode, AskView>>({ baseline: emptyView(), agent: emptyView() })
+
+/** Переключатель только листает ответ: считаем оба прогона сразу. */
+const view = computed(() => views[pipeline.value])
 
 const packages = computed(() => datasets.value.find((d) => d.id === datasetId.value)?.packages ?? [])
 const canAsk = computed(() => !asking.value && !!datasetId.value && !!packageId.value && question.value.trim().length >= 3)
 
+let controllers: AbortController[] = []
+
 function stop() {
-  controller?.abort()
-  controller = null
+  for (const c of controllers) c.abort()
+  controllers = []
 }
 
 function reset() {
   stop()
   asking.value = false
-  steps.value = []
-  answer.value = null
-  error.value = ''
+  views.baseline = emptyView()
+  views.agent = emptyView()
+}
+
+function runMode(mode: Mode) {
+  const v = views[mode]
+  v.running = true
+  const controller = new AbortController()
+  controllers.push(controller)
+  return askStream(
+    {
+      dataset: datasetId.value,
+      package: packageId.value,
+      question: question.value.trim(),
+      pipeline: mode,
+      guard: true,
+    },
+    {
+      onStep: (s) => v.steps.push(s),
+      onAnswer: (a) => {
+        v.answer = a
+      },
+    },
+    controller.signal,
+  )
+    .catch((e) => {
+      if (e instanceof ApiError) {
+        if (!isCanceled(e)) v.error = e.message
+      } else {
+        v.error = 'Не удалось спросить — сервер не отвечает'
+      }
+    })
+    .finally(() => {
+      v.running = false
+    })
 }
 
 async function ask() {
   if (!canAsk.value) return
   asking.value = true
-  answer.value = null
-  steps.value = []
-  error.value = ''
-  controller = new AbortController()
+  views.baseline = emptyView()
+  views.agent = emptyView()
   try {
-    await askStream(
-      {
-        dataset: datasetId.value,
-        package: packageId.value,
-        question: question.value.trim(),
-        pipeline: pipeline.value,
-        guard: true,
-      },
-      {
-        onStep: (s) => steps.value.push(s),
-        onAnswer: (a) => {
-          answer.value = a
-        },
-      },
-      controller.signal,
-    )
-  } catch (e) {
-    if (e instanceof ApiError) {
-      if (!isCanceled(e)) error.value = e.message
-    } else {
-      error.value = 'Не удалось спросить — сервер не отвечает'
-    }
+    await Promise.all([runMode('baseline'), runMode('agent')])
   } finally {
     asking.value = false
-    controller = null
   }
 }
 
@@ -195,12 +215,12 @@ onUnmounted(() => {
           </div>
         </form>
 
-        <p v-if="error" class="callout callout--bad">{{ error }}</p>
+        <p v-if="view.error" class="callout callout--bad">{{ view.error }}</p>
 
         <transition name="fade-slide">
-          <ol v-if="steps.length" class="trace" aria-label="Что делала система">
+          <ol v-if="view.steps.length" class="trace" aria-label="Что делала система">
             <li
-              v-for="(s, i) in steps"
+              v-for="(s, i) in view.steps"
               :key="`${s.node}-${i}`"
               class="trace__item"
               :class="s.ok === false ? 'is-bad' : s.ok ? 'is-ok' : ''"
@@ -214,20 +234,25 @@ onUnmounted(() => {
           </ol>
         </transition>
 
+        <p v-if="view.running && !view.answer" class="callout ask__wait">
+          <span class="ask__spin" />
+          {{ pipeline === 'agent' ? 'Агент проверяет себя — это дольше одного запроса…' : 'Ищем ответ в документах…' }}
+        </p>
+
         <transition name="fade-slide">
-          <div v-if="answer" class="answer">
+          <div v-if="view.answer" class="answer">
             <div class="answer__head">
-              <span class="badge" :class="statusMeta[answer.status].cls">
-                {{ statusMeta[answer.status].label }}
+              <span class="badge" :class="statusMeta[view.answer.status].cls">
+                {{ statusMeta[view.answer.status].label }}
               </span>
               <span class="answer__time muted">
-                {{ answer.elapsed_s.toFixed(2) }} с · {{ plural(answer.llm_calls, ['обращение', 'обращения', 'обращений']) }} к модели
+                {{ view.answer.elapsed_s.toFixed(2) }} с · {{ plural(view.answer.llm_calls, ['обращение', 'обращения', 'обращений']) }} к модели
               </span>
             </div>
-            <p class="answer__value">{{ answer.answer }}</p>
-            <blockquote v-if="answer.quote" class="answer__quote">
-              «{{ answer.quote }}»
-              <cite v-if="answer.file" class="answer__file mono">{{ packageId }}/{{ answer.file }}</cite>
+            <p class="answer__value">{{ view.answer.answer }}</p>
+            <blockquote v-if="view.answer.quote" class="answer__quote">
+              «{{ view.answer.quote }}»
+              <cite v-if="view.answer.file" class="answer__file mono">{{ packageId }}/{{ view.answer.file }}</cite>
             </blockquote>
           </div>
         </transition>
@@ -298,6 +323,12 @@ onUnmounted(() => {
 .ask__mode-btn.is-on {
   background: var(--accent);
   color: var(--on-accent);
+}
+
+.ask__wait {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
 }
 
 .ask__spin {
