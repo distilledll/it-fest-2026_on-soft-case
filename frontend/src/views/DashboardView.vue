@@ -5,18 +5,19 @@ import AppIcon from '@/components/AppIcon.vue'
 import BeforeAfterChart from '@/components/BeforeAfterChart.vue'
 import RunInsights from '@/components/RunInsights.vue'
 import RunsPanel from '@/components/RunsPanel.vue'
+import SimpleBars, { type BarSeries } from '@/components/SimpleBars.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
 import { releaseAfter, releaseBefore, shortType } from '@/api/benchmark'
 import { listDatasets } from '@/api/datasets'
 import { ApiError } from '@/api/http'
-import { answersCsvUrl, compareRuns } from '@/api/runs'
+import { answersCsvUrl, compareRuns, runInsights } from '@/api/runs'
 import { useAskModal } from '@/composables/useAskModal'
 import { useCountUp } from '@/composables/useCountUp'
 import { useDataset } from '@/composables/useDataset'
 import { useRuns } from '@/composables/useRuns'
 import { formatIndex, signed } from '@/utils/presentation'
 import { indexOfRow, indexOfType, shareOf, sumOf, sumVerdicts } from '@/utils/score'
-import type { CompareResult, DatasetInfo, RunMeta, Status, TypeBreakdown } from '@/types'
+import type { CompareResult, DatasetInfo, Insights, RunMeta, Status, TypeBreakdown } from '@/types'
 
 /** Минимум, который нужен экрану от прогона: разбивка по типам, индекс и метаданные. */
 interface RunView {
@@ -149,6 +150,40 @@ const types = computed<string[]>(() => {
 
 const labels = computed(() => types.value.map(shortType))
 const chartsReady = computed(() => before.value.scored && after.value.scored && types.value.length > 0)
+
+/* Пока эталона нет (контрольный набор): предварительные графики — как изменились ответы «было → стало»
+   и что поймали проверки. Как только загрузят ответы и прогоны пересчитаются, их место займут графики
+   с индексом доверия (chartsReady). */
+const preview = computed(() => !isSaved.value && !chartsReady.value)
+const STATUS_ORDER: Status[] = ['ответ', 'расхождение', 'нет в документах', 'не знаю']
+const statusSeries = computed<BarSeries[]>(() => [
+  { label: 'было · модель как есть', tone: 'before', data: STATUS_ORDER.map((s) => before.value.meta.statuses?.[s] ?? 0) },
+  { label: 'стало · с проверками', tone: 'after', data: STATUS_ORDER.map((s) => after.value.meta.statuses?.[s] ?? 0) },
+])
+const insights = ref<Insights | null>(null)
+watch(
+  [afterId, preview],
+  async ([id, need]) => {
+    insights.value = null
+    if (!id || !need) return
+    try {
+      const data = await runInsights(id)
+      if (afterId.value === id) insights.value = data
+    } catch {
+      insights.value = null
+    }
+  },
+  { immediate: true },
+)
+const checkLabels = computed(() => insights.value?.checks.map((c) => c.title) ?? [])
+const checkSeries = computed<BarSeries[]>(() => {
+  const cs = insights.value?.checks ?? []
+  return [
+    { label: 'исправлено', tone: 'ok', data: cs.map((c) => c.fixed) },
+    { label: '«не знаю» вместо догадки', tone: 'warn', data: cs.map((c) => c.refused) },
+    { label: 'подтверждено', tone: 'muted', data: cs.map((c) => c.kept) },
+  ]
+})
 const lineBefore = computed(() => types.value.map((t) => indexOfType(before.value.byType, t)))
 const lineAfter = computed(() => types.value.map((t) => indexOfType(after.value.byType, t)))
 
@@ -308,8 +343,13 @@ function downloadCurrent() {
 
       <!-- 2. Линейный график было/стало -->
       <section class="card panel reveal reveal-2" aria-label="Индекс доверия по типам вопросов">
-        <h2>Индекс доверия по типам вопросов</h2>
-        <p class="muted chart-sub">
+        <h2>{{ preview ? 'Ответы: было → стало' : 'Индекс доверия по типам вопросов' }}</h2>
+        <p v-if="preview" class="muted chart-sub">
+          Эталона пока нет — показываем, как изменились ответы: модель «как есть» почти всегда уверенно
+          «отвечает», система с проверками честно говорит «не знаю», когда не может подтвердить ответ цитатой.
+          Загрузите файл с ответами — здесь появится индекс доверия по типам вопросов.
+        </p>
+        <p v-else class="muted chart-sub">
           Пунктир — как отвечала модель «как есть». Сплошная линия — после проверок.
         </p>
         <BeforeAfterChart
@@ -319,6 +359,12 @@ function downloadCurrent() {
           :after="lineAfter"
           :legend-labels="lineLegend"
         />
+        <SimpleBars
+          v-else-if="preview"
+          :labels="STATUS_ORDER"
+          :series="statusSeries"
+          aria-label="Статусы ответов было и стало"
+        />
         <p v-else class="panel__empty muted">
           Разбивка по типам доступна для прогонов с эталонными ответами.
         </p>
@@ -326,12 +372,29 @@ function downloadCurrent() {
 
       <!-- 3. Гистограмма по типам вопросов -->
       <section class="card panel reveal reveal-3" aria-label="Вердикты по типам вопросов">
-        <h2>Где именно обманывал ИИ</h2>
-        <p class="muted chart-sub">
+        <h2>{{ preview ? 'Что поймали проверки' : 'Где именно обманывал ИИ' }}</h2>
+        <p v-if="preview" class="muted chart-sub">
+          Сколько раз каждая проверка нашла несоответствие в ответе «стало» и чем кончилось: модель исправила
+          ответ, система ответила «не знаю» или ответ подтвердился. После загрузки эталона — вердикты по типам.
+        </p>
+        <p v-else class="muted chart-sub">
           Столбик — все вопросы типа, цифра сверху — их количество. Красный сегмент там, где система
           была уверена и неправа.
         </p>
         <TypeHistogram v-if="chartsReady" :labels="labels" :counts="histogram" :legend-labels="barLegend" />
+        <SimpleBars
+          v-else-if="preview && checkLabels.length"
+          :labels="checkLabels"
+          :series="checkSeries"
+          stacked
+          horizontal
+          axis-title="вопросов"
+          :height="Math.max(220, 60 + checkLabels.length * 38)"
+          aria-label="Срабатывания проверок"
+        />
+        <p v-else-if="preview" class="panel__empty muted">
+          {{ insights ? 'Проверки прошли с первого раза на всех вопросах.' : 'Загружаем сводку проверок…' }}
+        </p>
         <p v-else class="panel__empty muted">
           Те же причины, что у графика выше: без оценки нечего раскладывать по типам.
         </p>
