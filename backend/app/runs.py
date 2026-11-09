@@ -37,6 +37,18 @@ STRATEGIES = {
 }
 
 
+# Подписи режимов для переключателя на фронте (GET /api/strategies).
+STRATEGY_INFO = [
+    {"id": "auto", "title": "Авто (по умолчанию)",
+     "description": "Закупка влезает в окно модели — читается целиком; не влезает — map-reduce по фрагментам."},
+    {"id": "map", "title": "Map-reduce всегда",
+     "description": "Модель читает закупку фрагментами, выписывает цитаты, код их проверяет; ответ — по выпискам. "
+                    "Точнее на больших закупках, но запросов в 3–5 раз больше."},
+    {"id": "full", "title": "Без map-reduce",
+     "description": "Целиком или фрагменты поиска, без чтения по частям — для сравнения."},
+]
+
+
 def make_context(roles: dict[str, str] | None = None, options: dict | None = None) -> Context:
     """Опции = стратегия (из профиля модели или запроса) + agent_options профиля роли answer + опции запроса."""
     models = llm.resolve_roles(roles)
@@ -308,13 +320,14 @@ LADDER = [
 
 
 async def run_ladder(dataset_id: str, roles: dict[str, str] | None = None, steps: list[str] | None = None,
-                     ladder_id: str | None = None) -> str:
-    """Все слои на одном датасете и одной модели — данные для графика вклада каждого слоя."""
+                     ladder_id: str | None = None, options: dict | None = None) -> str:
+    """Все слои на одном датасете и одной модели — данные для графика вклада каждого слоя.
+    options (напр. {"strategy": "map"}) идут во все шаги; то, что задаёт сам шаг лесенки, важнее."""
     ladder_id = ladder_id or new_run_id()
-    for order, (step, title, pipeline, options, use_guard) in enumerate(LADDER):
+    for order, (step, title, pipeline, step_options, use_guard) in enumerate(LADDER):
         if steps and step not in steps:
             continue
-        await run_set(dataset_id, pipeline, f"{title}", use_guard, roles, options,
+        await run_set(dataset_id, pipeline, f"{title}", use_guard, roles, {**(options or {}), **step_options},
                       ladder={"id": ladder_id, "step": step, "title": title, "order": order})
     return ladder_id
 

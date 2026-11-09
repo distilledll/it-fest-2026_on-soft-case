@@ -328,3 +328,9 @@ class InsightsOut(Out):
     outcomes: dict[str, int] = Field(description="{fixed, refused, kept}")
     checks: list[InsightCheckStats] = Field(description="по каждой проверке: сколько раз сработала и чем кончилось")
     events: list[InsightEvent]
+
+
+class StrategyInfo(Out):
+    id: str = Field(examples=["map"])
+    title: str = Field(examples=["Map-reduce всегда"])
+    description: str

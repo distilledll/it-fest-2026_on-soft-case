@@ -76,3 +76,18 @@ def test_bad_gold_rejected():
     r = c.post(f"/api/datasets/{did}/gold", files={"file": ("a.json", json.dumps(alien, ensure_ascii=False))})
     assert r.status_code == 422 and "X99-01" in r.json()["detail"]
     assert c.post("/api/datasets/sample/gold", files={"file": ("a.json", "[]")}).status_code in (404, 422)
+
+
+def test_strategies_and_ladder_options(monkeypatch):
+    assert [s["id"] for s in c.get("/api/strategies").json()] == ["auto", "map", "full"]
+    seen = []
+
+    async def fake_run_set(dataset_id, pipeline, label, use_guard, roles, options, ladder=None):
+        seen.append((ladder["step"], options))
+    monkeypatch.setattr(runs, "run_set", fake_run_set)
+    asyncio.run(runs.run_ladder("sample", options={"strategy": "map"}, steps=["prompt", "full"]))
+    assert seen[0] == ("prompt", {"strategy": "map", "critics": [], "llm_critic": False, "max_attempts": 1})
+    assert seen[1] == ("full", {"strategy": "map"})
+    did = datasets.from_zip(control_zip(), "control")
+    assert c.post("/api/ladders", json={"dataset": did, "options": {"strategy": "nope"}}).status_code == 422
+    assert c.post("/api/runs", json={"dataset": did, "options": {"strategy": "nope"}}).status_code == 422

@@ -135,6 +135,25 @@ GET /api/runs/{run_id}/caught
 GET /api/runs/compare/{before}/{after}   → метрики обоих + changed[] (вопросы, где вердикт изменился)
 ```
 
+### 7а. Режим чтения закупки (map-reduce)
+
+Отдельной ручки «включить map-reduce» нет — это параметр `options.strategy` в обычных запросах:
+```
+GET /api/strategies   → [{id, title, description}]   — для переключателя: auto | map | full
+POST /api/runs     {"dataset": "...", "pipeline": "hybrid", "options": {"strategy": "map"}}
+POST /api/ask      {"dataset": "...", "package": "K02", "question": "...", "options": {"strategy": "map"}}
+POST /api/ladders  {"dataset": "...", "options": {"strategy": "map"}}      — режим идёт во все шаги
+PATCH /api/models/{id} {"agent_options": {"strategy": "map"}}             — по умолчанию для этой модели
+```
+- `auto` (по умолчанию) — map-reduce сам включается, если закупка не влезает в окно модели
+  (на контрольном наборе — только K02, 1,3 млн символов).
+- `map` — map-reduce на всех закупках: точнее, но запросов в 3–5 раз больше (контрольный набор ~11 мин).
+- `full` — без map-reduce, для сравнения.
+- Неизвестный режим → 422. Режим прогона виден в `meta.options.strategy`.
+
+**Что нужно на фронте:** [ ] переключатель режима (из `GET /api/strategies`) у запуска прогона, лесенки
+и в окне вопроса; передавать `options.strategy`. Показывать режим в карточке прогона.
+
 ### 8. Контрольный набор: без эталона, эталон позже
 
 Контрольный архив организатора приходит **без ответов** (`answers_public.json` нет), а файл вопросов
