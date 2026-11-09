@@ -250,6 +250,32 @@ def _by_type(result_csv: Path) -> dict:
     return out
 
 
+def rescore_run(run_id: str) -> dict:
+    """Пересчитать оценку завершённого прогона — например, после того как к набору загрузили эталон."""
+    out = settings.runs_dir / run_id
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    if meta.get("status") != "done":
+        raise ValueError("прогон ещё не завершён")
+    data_dir = datasets.path_of(meta["dataset"])
+    if not (data_dir / "answers_public.json").exists():
+        raise ValueError("у набора нет эталона: загрузите answers_public.json")
+    meta["score"] = score(out / "answers.csv", data_dir, out / "result.csv")
+    meta["rescored_at"] = datetime.now().isoformat(timespec="seconds")
+    _write_meta(out, meta)
+    meta["score"].pop("report", None)
+    return meta
+
+
+def rescore_dataset(dataset_id: str) -> list[dict]:
+    """Все завершённые прогоны набора — в том числе шаги лесенок: графики «было/стало» строятся сразу."""
+    done = []
+    for p in sorted(settings.runs_dir.glob("*/meta.json")):
+        m = json.loads(p.read_text(encoding="utf-8"))
+        if m.get("dataset") == dataset_id and m.get("status") == "done":
+            done.append(rescore_run(p.parent.name))
+    return done
+
+
 def read_meta(run_id: str) -> dict:
     meta = json.loads((settings.runs_dir / run_id / "meta.json").read_text(encoding="utf-8"))
     if run_id in PROGRESS:

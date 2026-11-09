@@ -90,6 +90,26 @@ def run_caught(run_id: str):
     return analyze(run_id)
 
 
+@router.get("/{run_id}/insights", response_model=out.InsightsOut)
+def run_insights(run_id: str):
+    """Что заметили проверки — работает и без эталона (контрольный набор): какая проверка на каком вопросе
+    нашла несоответствие и чем кончилось. С эталоном к событиям добавляется вердикт check.py."""
+    _dir(run_id)
+    from app.insights import insights
+    return insights(run_id)
+
+
+@router.post("/{run_id}/rescore", response_model=out.RunMeta)
+def run_rescore(run_id: str):
+    """Пересчитать оценку прогона check.py (например, после загрузки эталона)."""
+    _dir(run_id)
+    from app.runs import rescore_run
+    try:
+        return rescore_run(run_id)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 @router.post("/{run_id}/resume", status_code=202, response_model=out.RunStarted)
 async def resume(run_id: str):
     """Дозапустить прогон: вопросы, которых нет (процесс упал) или которые упали из-за сети/тайм-аута."""

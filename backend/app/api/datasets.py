@@ -43,6 +43,21 @@ async def upload(files: list[UploadFile] = File(...), name: str = Form(""), pack
     return datasets.info(did)
 
 
+@router.post("/{did}/gold", response_model=out.GoldOut)
+async def upload_gold(did: str, file: UploadFile = File(...)):
+    """Эталон для набора, загруженного без ответов (контрольный набор): answers_public.json в формате
+    организатора. После загрузки все завершённые прогоны набора пересчитываются check.py — дашборд
+    «было/стало» и графики строятся сразу, перезапускать прогоны не нужно."""
+    from app.runs import rescore_dataset
+    _dir(did)
+    data = await file.read(settings.max_upload_mb * 2**20 + 1)
+    try:
+        res = datasets.set_gold(did, data)
+    except DatasetError as e:
+        raise HTTPException(422, str(e))
+    return {"dataset": datasets.info(did), **res, "rescored": rescore_dataset(did)}
+
+
 @router.get("/{did}", response_model=out.DatasetDetail)
 def get_dataset(did: str):
     root = _dir(did)

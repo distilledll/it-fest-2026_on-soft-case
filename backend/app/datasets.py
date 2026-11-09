@@ -120,8 +120,10 @@ def from_zip(data: bytes, name: str) -> str:
                 rel = parts[len(root):]
                 if rel[:1] == ("packages",) and len(rel) == 3 and rel[2].lower().endswith(".txt"):
                     _write(dest / "packages" / rel[1] / rel[2], zf.read(i))
-                elif len(rel) == 1 and rel[0] in ("questions.csv", "answers_public.json"):
-                    _write(dest / rel[0], zf.read(i))
+                elif len(rel) == 1 and (std := standard_name(rel[0])):
+                    # questions_control.csv → questions.csv; точное имя важнее, если в архиве оба
+                    if not (dest / std).exists() or rel[0] == std:
+                        _write(dest / std, zf.read(i))
         else:
             # Произвольный архив: папка с txt = закупка, txt в корне = закупка "P01".
             for parts, i in files.items():
@@ -137,6 +139,41 @@ def from_zip(data: bytes, name: str) -> str:
     return did
 
 
+def standard_name(name: str) -> str | None:
+    """Под каким стандартным именем хранить служебный файл набора. Организатор называет файлы по-разному:
+    questions.csv, questions_control.csv; answers_public.json, answers_control.json."""
+    low = name.lower()
+    if low.endswith(".csv") and low.startswith("questions"):
+        return "questions.csv"
+    if low.endswith(".json") and low.startswith("answers"):
+        return "answers_public.json"
+    return None
+
+
+def set_gold(dataset_id: str, data: bytes) -> dict:
+    """Эталон (answers_public.json) для набора, загруженного без ответов, — например, контрольного:
+    организатор может выдать ответы после сдачи. Прогоны набора после этого можно пересчитать."""
+    from app.ingest import load_questions
+    if dataset_id == "sample":
+        raise DatasetError("эталон примера организатора менять нельзя")
+    root = path_of(dataset_id)
+    try:
+        gold = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise DatasetError(f"файл эталона — не JSON: {e}")
+    need = ("id", "status", "type", "kind", "expected")
+    if not isinstance(gold, list) or not gold or not all(isinstance(g, dict) and all(k in g for k in need)
+                                                           for g in gold):
+        raise DatasetError("ожидается answers_public.json в формате организатора: список объектов с полями "
+                           + ", ".join(need))
+    qids = {q.id for q in load_questions(root)} if (root / "questions.csv").exists() else set()
+    gids = {str(g["id"]) for g in gold}
+    if qids and (unknown := sorted(gids - qids)):
+        raise DatasetError(f"в эталоне есть вопросы, которых нет в наборе: {', '.join(unknown[:5])}")
+    (root / "answers_public.json").write_text(json.dumps(gold, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"gold": len(gids), "questions": len(qids), "missing": sorted(qids - gids)}
+
+
 def from_files(files: list[tuple[str, bytes]], name: str, package: str = "P01") -> str:
     """Загрузка отдельных .txt — одна закупка, вопросы будут строкой ввода."""
     if not package or PurePosixPath(package).name != package or package in (".", "..") or "\\" in package:
@@ -147,8 +184,8 @@ def from_files(files: list[tuple[str, bytes]], name: str, package: str = "P01") 
             if fname.lower().endswith(".txt"):
                 basename = PurePosixPath(fname.replace("\\", "/")).name
                 _write(dest / "packages" / package / basename, data)
-            elif fname in ("questions.csv", "answers_public.json"):
-                _write(dest / fname, data)
+            elif std := standard_name(PurePosixPath(fname.replace("\\", "/")).name):
+                _write(dest / std, data)
         if not (dest / "packages").exists():
             raise DatasetError("нужен хотя бы один .txt")
     except Exception:
