@@ -86,8 +86,9 @@ function settleLadder(): void {
 }
 
 /** «Было → стало» одним запуском: baseline и hybrid (агент + резервный проход) идут по очереди на одном датасете. */
-async function startBoth(dataset: string): Promise<string> {
-  const { ladder_id } = await startLadder({ dataset, steps: [...BOTH_STEPS] })
+async function startBoth(dataset: string, strategy = 'auto'): Promise<string> {
+  const options = strategy && strategy !== 'auto' ? { strategy } : undefined
+  const { ladder_id } = await startLadder({ dataset, steps: [...BOTH_STEPS], options })
   ladderId.value = ladder_id
   ladderDeadline = Date.now() + 30_000
   await refresh()

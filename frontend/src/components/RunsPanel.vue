@@ -6,11 +6,12 @@ import AppIcon from '@/components/AppIcon.vue'
 import { listDatasets } from '@/api/datasets'
 import { ApiError } from '@/api/http'
 import { answersCsvUrl } from '@/api/runs'
+import { listStrategies } from '@/api/strategies'
 import { getHealth } from '@/api/system'
 import { useDataset } from '@/composables/useDataset'
 import { useRuns } from '@/composables/useRuns'
 import { agoLabel, shortTime } from '@/utils/presentation'
-import type { DatasetInfo, HealthInfo, RunMeta } from '@/types'
+import type { DatasetInfo, HealthInfo, RunMeta, Strategy } from '@/types'
 
 const {
   runs,
@@ -32,7 +33,9 @@ const router = useRouter()
 
 const datasets = ref<DatasetInfo[]>([])
 const health = ref<HealthInfo | null>(null)
+const strategies = ref<Strategy[]>([])
 const datasetId = ref('')
+const strategy = ref('auto')
 const pipeline = ref('')
 const label = ref('')
 const guard = ref(true)
@@ -51,6 +54,15 @@ const runnable = computed(() => datasets.value.filter((d) => d.has_questions))
 const datasetChosen = computed(() => runnable.value.some((d) => d.id === datasetId.value))
 const canStartBoth = computed(() => datasetChosen.value && !bothBusy.value && !ladderRunning.value)
 const canStart = computed(() => datasetChosen.value && !!pipeline.value && !busy.value)
+/** Отдаём strategy в body только когда выбрали нестандартный режим — «авто» и так по умолчанию. */
+const runOptions = computed<Record<string, unknown> | undefined>(() =>
+  strategy.value && strategy.value !== 'auto' ? { strategy: strategy.value } : undefined,
+)
+const strategyHint = computed(
+  () => strategies.value.find((s) => s.id === strategy.value)?.description ?? '',
+)
+/** Короткие подписи сегментов; полноe название и описание — в title и подсказке. */
+const STRATEGY_SHORT: Record<string, string> = { auto: 'авто', map: 'map-reduce', full: 'без map-reduce' }
 const ladderTotal = 2
 const ladderPct = computed(() => {
   if (!ladderId.value) return 0
@@ -116,6 +128,11 @@ async function load() {
   } catch {
     health.value = null
   }
+  try {
+    strategies.value = await listStrategies()
+  } catch {
+    strategies.value = []
+  }
   pipeline.value = health.value?.default_pipeline ?? 'baseline'
   datasetId.value =
     active.value && runnable.value.some((d) => d.id === active.value?.id)
@@ -134,6 +151,7 @@ async function onStart() {
       pipeline: pipeline.value,
       label: label.value.trim(),
       guard: guard.value,
+      options: runOptions.value,
     })
     notice.value = `Прогон ${id} запущен — прогресс ниже`
     label.value = ''
@@ -150,7 +168,7 @@ async function onStartBoth() {
   notice.value = ''
   bothBusy.value = true
   try {
-    await startBoth(datasetId.value)
+    await startBoth(datasetId.value, strategy.value)
   } catch (e) {
     problem.value = e instanceof ApiError ? e.message : 'не удалось запустить измерение'
   } finally {
@@ -227,6 +245,26 @@ onBeforeUnmount(() => clearInterval(tick))
         </select>
         <span class="field__hint">Прогон возможен только с <span class="mono">questions.csv</span>.</span>
       </label>
+
+      <div v-if="strategies.length" class="field">
+        <span class="field__label">Режим чтения закупки</span>
+        <div class="runs__mode" role="group" aria-label="Режим чтения закупки">
+          <button
+            v-for="s in strategies"
+            :key="s.id"
+            type="button"
+            class="runs__mode-btn"
+            :class="{ 'is-on': strategy === s.id }"
+            :aria-pressed="strategy === s.id"
+            :disabled="bothBusy || busy"
+            :title="s.description"
+            @click="strategy = s.id"
+          >
+            {{ STRATEGY_SHORT[s.id] ?? s.title }}
+          </button>
+        </div>
+        <span class="field__hint">{{ strategyHint || 'Как модель читает закупку: целиком или по частям.' }}</span>
+      </div>
 
       <div class="runs__go">
         <button class="btn btn--primary" type="button" :disabled="!canStartBoth" @click="onStartBoth">
@@ -362,6 +400,39 @@ onBeforeUnmount(() => clearInterval(tick))
   display: grid;
   align-content: end;
   gap: var(--s-2);
+}
+
+.runs__mode {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+}
+
+.runs__mode-btn {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background var(--t) var(--ease), color var(--t) var(--ease);
+}
+
+.runs__mode-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.runs__mode-btn.is-on {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 .runs__guard {

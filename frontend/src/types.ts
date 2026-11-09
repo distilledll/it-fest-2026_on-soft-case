@@ -128,6 +128,13 @@ export interface Ladder {
   steps: LadderStep[]
 }
 
+/** GET /api/strategies — режим чтения закупки; передаётся как options.strategy в прогоны/лесенки/вопрос. */
+export interface Strategy {
+  id: 'auto' | 'map' | 'full' | string
+  title: string
+  description: string
+}
+
 /** GET /api/runs/compare/{before}/{after} */
 export interface ChangedQuestion {
   id: string

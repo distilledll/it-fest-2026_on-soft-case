@@ -12,6 +12,8 @@ export interface LadderStart {
   roles?: Record<string, string>
   /** Шаги лесенки; пусто — все четыре слоя. Для «было → стало» хватает ['baseline', 'hybrid']. */
   steps?: string[]
+  /** Режимы на все шаги, напр. { strategy: 'map' }. */
+  options?: Record<string, unknown>
 }
 
 /** POST /api/ladders — 202 + ladder_id; шаги идут по очереди, прогресс смотри в listLadders(). */
