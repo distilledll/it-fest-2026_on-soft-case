@@ -338,10 +338,6 @@ onMounted(load)
           критик, эмбеддинги, реранк.
         </p>
       </div>
-      <RouterLink class="btn btn--ghost back" :to="{ name: 'home' }">
-        <AppIcon name="arrow-right" size="sm" />
-        На главную
-      </RouterLink>
     </header>
 
     <p v-if="error" class="msg msg--bad"><AppIcon name="alert" size="sm" /> {{ error }}</p>
@@ -867,10 +863,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.back .icon {
-  rotate: 180deg;
-}
-
 .msg {
   display: flex;
   align-items: center;

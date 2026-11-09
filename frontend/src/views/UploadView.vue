@@ -195,10 +195,6 @@ onUnmounted(() => controller?.abort())
           <span class="mono">answers_public.json</span>.
         </p>
       </div>
-      <RouterLink class="btn btn--ghost back" :to="{ name: 'dashboard' }">
-        <AppIcon name="arrow-right" size="sm" />
-        К дашборду
-      </RouterLink>
     </header>
 
     <section
@@ -391,10 +387,6 @@ onUnmounted(() => controller?.abort())
 </template>
 
 <style scoped>
-.back .icon {
-  rotate: 180deg;
-}
-
 .drop {
   display: grid;
   justify-items: center;

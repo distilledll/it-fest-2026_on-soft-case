@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '@/components/AppIcon.vue'
 import AskModal from '@/components/AskModal.vue'
@@ -8,9 +8,16 @@ import HelpTooltip from '@/components/HelpTooltip.vue'
 import { useTheme } from '@/composables/useTheme'
 
 const route = useRoute()
+const router = useRouter()
 const { theme, toggle } = useTheme()
 
 const bare = computed(() => route.meta.bare === true)
+
+/** Назад по истории; если history пуст (глубокая ссылка) — на главную. */
+function goBack(): void {
+  if (window.history.state?.back) router.back()
+  else void router.push({ name: 'home' })
+}
 </script>
 
 <template>
@@ -33,6 +40,10 @@ const bare = computed(() => route.meta.bare === true)
       </button>
       <HelpTooltip v-if="!bare" />
     </div>
+
+    <button v-if="!bare" class="dock dock--back" type="button" aria-label="Назад" title="Назад" @click="goBack">
+      <AppIcon name="arrow-right" />
+    </button>
 
     <RouterLink v-if="!bare" class="dock dock--gear" to="/settings" title="Настройки">
       <AppIcon name="settings" />
@@ -72,6 +83,24 @@ const bare = computed(() => route.meta.bare === true)
 .dock--top {
   top: var(--s-4);
   inset-inline-end: var(--s-4);
+}
+
+/* Стрелка «назад» в левом верхнем углу — одна на все страницы. */
+.dock--back {
+  top: var(--s-4);
+  inset-inline-start: var(--s-4);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--t) var(--ease), border-color var(--t) var(--ease);
+}
+
+.dock--back:hover {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
+.dock--back .icon {
+  rotate: 180deg;
 }
 
 .dock .icon-btn {
