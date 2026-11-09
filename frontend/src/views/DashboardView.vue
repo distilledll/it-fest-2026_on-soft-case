@@ -8,6 +8,7 @@ import TypeHistogram from '@/components/TypeHistogram.vue'
 import { listDatasets } from '@/api/datasets'
 import { ApiError } from '@/api/http'
 import { answersCsvUrl, compareRuns } from '@/api/runs'
+import { useAskModal } from '@/composables/useAskModal'
 import { useCountUp } from '@/composables/useCountUp'
 import { useDataset } from '@/composables/useDataset'
 import { useRuns } from '@/composables/useRuns'
@@ -59,6 +60,7 @@ const EMPTY_VIEW: RunView = {
 
 const { finished, loading, refresh } = useRuns()
 const { active, setActive } = useDataset()
+const { show: openAsk } = useAskModal()
 
 const datasets = ref<DatasetInfo[]>([])
 const datasetId = ref('')
@@ -340,7 +342,18 @@ function downloadCurrent() {
         </p>
       </section>
 
-      <!-- 4. Прогоны: запуск и живой прогресс -->
+      <!-- 4. Прямой вопрос к документам -->
+      <div class="dash__ask reveal">
+        <button class="btn btn--primary" type="button" @click="openAsk()">
+          <AppIcon name="message" size="sm" />
+          Задать вопрос
+        </button>
+        <p class="muted dash__ask-hint">
+          Своими словами — по любой закупке из выбранного датасета, как это сделает жюри на защите.
+        </p>
+      </div>
+
+      <!-- 5. Прогоны: запуск и живой прогресс -->
       <RunsPanel />
     </div>
 
@@ -543,6 +556,20 @@ function downloadCurrent() {
   padding: var(--s-5) 0;
   border-top: 1px dashed var(--border);
   max-width: 70ch;
+}
+
+.dash__ask {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  text-align: center;
+}
+
+.dash__ask-hint {
+  margin: 0;
+  font-size: 13px;
 }
 
 .dash__foot {
