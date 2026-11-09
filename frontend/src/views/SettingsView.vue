@@ -884,6 +884,11 @@ onMounted(load)
   color: var(--bad);
 }
 
+.area + .area {
+  /* между «Привязками LLM» и «Моделями» воздух, а не стык карточек */
+  margin-top: var(--s-6);
+}
+
 .area__head {
   display: flex;
   align-items: flex-start;

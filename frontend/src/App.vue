@@ -5,12 +5,10 @@ import { useRoute } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import AskModal from '@/components/AskModal.vue'
 import HelpTooltip from '@/components/HelpTooltip.vue'
-import { useAskModal } from '@/composables/useAskModal'
 import { useTheme } from '@/composables/useTheme'
 
 const route = useRoute()
 const { theme, toggle } = useTheme()
-const { show: openAsk } = useAskModal()
 
 const bare = computed(() => route.meta.bare === true)
 </script>
@@ -24,10 +22,7 @@ const bare = computed(() => route.meta.bare === true)
     </router-view>
 
     <div class="dock dock--top">
-      <button v-if="!bare" class="btn btn--soft dock__ask" type="button" @click="openAsk()">
-        <AppIcon name="message" size="sm" />
-        Задать вопрос
-      </button>
+      <!-- Кнопку «Задать вопрос» вернём, когда модалку будет чем открыть из интерфейса. -->
       <button
         class="icon-btn"
         type="button"
@@ -79,19 +74,8 @@ const bare = computed(() => route.meta.bare === true)
   inset-inline-end: var(--s-4);
 }
 
-.dock__ask {
-  border: none;
-  padding-block: 7px;
-  border-radius: var(--r-xs);
-}
-
 .dock .icon-btn {
   border-radius: var(--r-xs);
-}
-
-.dock__ask:hover {
-  transform: none;
-  box-shadow: none;
 }
 
 /* Шестерёнка внизу слева: подпись раскрывается при наведении. */
@@ -141,12 +125,6 @@ const bare = computed(() => route.meta.bare === true)
   from {
     opacity: 0;
     transform: translateY(-8px);
-  }
-}
-
-@media (max-width: 640px) {
-  .dock__ask {
-    display: none;
   }
 }
 </style>
