@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 
 import AppIcon from '@/components/AppIcon.vue'
 import BeforeAfterChart from '@/components/BeforeAfterChart.vue'
+import RunInsights from '@/components/RunInsights.vue'
 import RunsPanel from '@/components/RunsPanel.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
 import { releaseAfter, releaseBefore, shortType } from '@/api/benchmark'
@@ -329,6 +330,9 @@ function downloadCurrent() {
         </p>
       </section>
 
+      <!-- 3.5 Что заметили проверки кода -->
+      <RunInsights :run-id="afterId" />
+
       <!-- 4. Прямой вопрос к документам -->
       <div class="dash__ask reveal">
         <button class="btn btn--primary" type="button" @click="openAsk()">
@@ -556,6 +560,11 @@ function downloadCurrent() {
 
 /* Прогон — во всю ширину, как блок с графиками. */
 .dash > .runs {
+  grid-column: 1 / -1;
+}
+
+/* Разбор проверок — тоже во всю ширину, независимо от порядка в сетке. */
+.dash > .insights {
   grid-column: 1 / -1;
 }
 

@@ -151,6 +151,59 @@ export interface CompareResult {
   changed: ChangedQuestion[]
 }
 
+/** GET /api/runs/{id}/insights — что заметили проверки кода на прогоне. */
+export interface InsightCheckHit {
+  check: string
+  title: string
+  what?: string
+  message?: string
+}
+
+export interface InsightEventFinal {
+  status?: string | null
+  answer?: string | null
+  quote?: string | null
+  file?: string | null
+}
+
+export interface InsightEvent {
+  id: string
+  package?: string
+  question?: string
+  checks: InsightCheckHit[]
+  draft?: string
+  final?: InsightEventFinal
+  outcome: string
+  outcome_title: string
+  summary: string
+  verdict?: { verdict?: string; why?: string } | null
+}
+
+export interface InsightCheckStats {
+  check: string
+  title: string
+  what?: string
+  fired: number
+  fixed: number
+  refused: number
+  kept: number
+}
+
+export interface Insights {
+  run_id: string
+  label?: string
+  pipeline?: string | null
+  dataset: string
+  has_gold: boolean
+  n: number
+  statuses: Record<string, number>
+  with_checks: number
+  clean: number
+  outcomes: Record<string, number>
+  checks: InsightCheckStats[]
+  events: InsightEvent[]
+}
+
 export interface TypeBreakdown {
   /** тип вопроса -> вердикт -> количество */
   [type: string]: Record<Verdict, number>
