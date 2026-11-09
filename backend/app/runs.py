@@ -268,9 +268,11 @@ def list_runs() -> list[dict]:
 LADDER = [
     # step,      подпись для графика,            пайплайн,   опции,                                                guard
     ("baseline", "Baseline «как есть»",          "baseline", {},                                                   False),
+    ("direct",   "+ разрешили «не знаю»",        "direct",   {},                                                   False),
     ("prompt",   "Промпт агента",                "agent",    {"critics": [], "llm_critic": False, "max_attempts": 1}, False),
     ("critics",  "+ критики кодом и повторы",    "agent",    {"llm_critic": False},                                True),
     ("full",     "+ критик-модель (полный агент)", "agent",  {},                                                   True),
+    ("hybrid",   "+ резервный проход TrustQA",   "hybrid",   {},                                                   True),
 ]
 
 

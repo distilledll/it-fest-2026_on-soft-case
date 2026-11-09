@@ -6,6 +6,7 @@ from app import llm
 from app.config import settings
 from app.pipeline.base import Context, Pipeline, collect
 from app.schemas import Answer, Document, Question, Status, TraceStep
+from app.verify import guard
 from trustqa.api import Jina, Qwen, ServiceUnavailable
 from trustqa.config import Config
 from trustqa.context import Window
@@ -28,7 +29,7 @@ def review(q: Question, docs: list[Document], config: Config) -> Answer:
         result, audit = engine.answer(package, q.question, mode="D")
     except ServiceUnavailable as exc:
         return Answer(id=q.id, status=Status.UNKNOWN, llm_calls=client.calls, trace=[
-            TraceStep(node="error", ok=False, message=f"TrustQA: {exc}")])
+            TraceStep(node="trustqa", ok=False, message=f"TrustQA недоступен: {exc}")])
     return Answer(id=q.id, status=result["status"], answer=result.get("answer", ""),
                   quote=result.get("quote", ""), file=result.get("file", ""), llm_calls=audit["calls"],
                   trace=[TraceStep(node="trustqa", ok=result["status"] != Status.UNKNOWN,
@@ -42,8 +43,9 @@ def review(q: Question, docs: list[Document], config: Config) -> Answer:
 class HybridPipeline:
     name = "hybrid"
 
-    def __init__(self, primary: Pipeline):
+    def __init__(self, primary: Pipeline, use_guard: bool = False):
         self.primary = primary
+        self.use_guard = use_guard
 
     async def answer(self, q: Question, docs: list[Document], ctx: Context) -> Answer:
         return await collect(self.stream(q, docs, ctx))
@@ -57,12 +59,19 @@ class HybridPipeline:
                 yield item
                 return
             yield TraceStep(node="fallback", message="Агент ответил «не знаю». TrustQA сверяет документы.")
-            config = Config.from_env()
-            config.require_qwen()
-            config = replace(config, cache_dir=str(settings.storage_dir / "trustqa-cache"))
-            profile = llm.ModelProfile(id="trustqa-fallback", name="TrustQA", base_url=config.qwen_base_url,
-                                       model=config.qwen_model, concurrency=1)
-            checked = await llm.call(asyncio.to_thread, review, q, docs, config, profile=profile)
+            try:
+                config = Config.from_env()
+                config.require_qwen()
+                config = replace(config, cache_dir=str(settings.storage_dir / "trustqa-cache"))
+                profile = llm.ModelProfile(id="trustqa-fallback", name="TrustQA", base_url=config.qwen_base_url,
+                                           model=config.qwen_model, concurrency=1)
+                checked = await llm.call(asyncio.to_thread, review, q, docs, config, profile=profile)
+            except Exception as exc:  # noqa: BLE001 — резервный проход не сработал: остаётся честное «не знаю» агента
+                yield TraceStep(node="trustqa", ok=False, message=f"TrustQA не сработал: {type(exc).__name__}: {exc}"[:300])
+                yield item
+                return
+            if self.use_guard:   # цитата должна быть в документах; арифметику TrustQA проверяет сам, кодом
+                checked = guard(checked, docs, q.question, quote_only=True)
             for step in checked.trace:
                 yield step
             checked.trace = []
