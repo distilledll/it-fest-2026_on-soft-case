@@ -5,7 +5,6 @@ import AppIcon from '@/components/AppIcon.vue'
 import BeforeAfterChart from '@/components/BeforeAfterChart.vue'
 import RunsPanel from '@/components/RunsPanel.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
-import { QUESTION_TYPES, mockAfter, mockBefore, shortType } from '@/api/mock'
 import { ApiError } from '@/api/http'
 import { answersCsvUrl, compareRuns } from '@/api/runs'
 import { useCountUp } from '@/composables/useCountUp'
@@ -37,12 +36,24 @@ function viewOf(meta: RunMeta): RunView {
   return { meta, byType, scored, index }
 }
 
-const demo = (m: typeof mockAfter): RunView => ({
-  meta: m.meta,
-  byType: m.breakdown,
-  scored: true,
-  index: m.score.index,
-})
+/** Короткие подписи типов вопросов для осей графиков. */
+const SHORT: Record<string, string> = {
+  'факт': 'факт',
+  'расчёт': 'расчёт',
+  'после изменений': 'после изм.',
+  'ловушка: нет в документах': 'нет в док.',
+  'ловушка: требования нет': 'треб. нет',
+  'расхождение': 'расхождение',
+}
+const shortType = (type: string) => SHORT[type] ?? type
+
+/** Пустой прогон: пока пары нет, экран обязан показывать прочерки, а не выдуманные цифры. */
+const EMPTY_VIEW: RunView = {
+  meta: { run_id: '', label: '', dataset: '', pipeline: '', guard: false, status: 'done', created_at: '' },
+  byType: {},
+  scored: false,
+  index: null,
+}
 
 const { finished, byId, refresh } = useRuns()
 
@@ -86,12 +97,12 @@ watch([beforeId, afterId], async ([b, a]) => {
   }
 })
 
-const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : demo(mockBefore)))
-const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : demo(mockAfter)))
-const isDemo = computed(() => !pair.value)
+const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : EMPTY_VIEW))
+const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : EMPTY_VIEW))
+const hasPair = computed(() => !!pair.value)
 
 const types = computed<string[]>(() => {
-  if (!pair.value) return [...QUESTION_TYPES]
+  if (!pair.value) return []
   const both = new Set([...Object.keys(before.value.byType), ...Object.keys(after.value.byType)])
   return [...both].sort()
 })
@@ -181,7 +192,6 @@ function downloadCurrent() {
       </div>
 
       <div class="pair">
-        <span v-if="isDemo" class="badge badge--warn">демо-данные</span>
         <label class="field pair__field">
           <span class="field__label">прогон «было»</span>
           <select v-model="beforeId" class="select" @change="autoPick = false">
@@ -206,10 +216,10 @@ function downloadCurrent() {
     <p v-if="pairError" class="dash__note dash__note--bad">
       <AppIcon name="alert" size="sm" /> {{ pairError }}
     </p>
-    <p v-else-if="isDemo" class="dash__note">
+    <p v-else-if="!hasPair" class="dash__note">
       <AppIcon name="alert" size="sm" />
-      Сравнения прогонов пока нет — ниже цифры из демо-набора. Запустите прогон в блоке «Прогоны на
-      сервере».
+      Пары прогонов для сравнения пока нет — запустите прогоны в блоке «Прогоны на сервере» и выберите
+      «было» и «стало».
     </p>
 
     <div class="dash">
@@ -244,7 +254,7 @@ function downloadCurrent() {
           </li>
         </ul>
 
-        <dl class="index__meta">
+        <dl v-if="pair" class="index__meta">
           <div>
             <dt>вопросов</dt>
             <dd>{{ after.meta.n ?? '—' }}</dd>

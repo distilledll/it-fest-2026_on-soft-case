@@ -1,9 +1,25 @@
 <script setup lang="ts">
-import AppIcon from '@/components/AppIcon.vue'
-import { formatIndex } from '@/utils/presentation'
-import { mockAfter } from '@/api/mock'
+import { onMounted, ref } from 'vue'
 
-const indexNow = mockAfter.score.index
+import AppIcon from '@/components/AppIcon.vue'
+import { listDatasets } from '@/api/datasets'
+import { listRuns } from '@/api/runs'
+import { formatIndex } from '@/utils/presentation'
+import type { DatasetInfo, RunMeta } from '@/types'
+
+/* Живые цифры с сервера: что грузили, чем последний прогон мерился, какой индекс вышел. */
+const dataset = ref<DatasetInfo | null>(null)
+const last = ref<RunMeta | null>(null)
+
+onMounted(async () => {
+  const [ds, runs] = await Promise.all([
+    listDatasets().catch(() => [] as DatasetInfo[]),
+    listRuns().catch(() => [] as RunMeta[]),
+  ])
+  dataset.value = ds[0] ?? null
+  const done = runs.filter((r) => r.status === 'done')
+  last.value = done.sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''))[done.length - 1] ?? null
+})
 </script>
 
 <template>
@@ -36,20 +52,22 @@ const indexNow = mockAfter.score.index
     <section class="card home__strip reveal reveal-2" aria-label="Текущее состояние">
       <div class="strip__cell">
         <span class="strip__label">Датасет</span>
-        <span class="strip__value">Пример организатора</span>
+        <span class="strip__value">{{ dataset ? dataset.name : 'нет данных' }}</span>
       </div>
       <span class="strip__sep" aria-hidden="true" />
       <div class="strip__cell">
         <span class="strip__label">Последний прогон</span>
         <span class="strip__value">
-          {{ mockAfter.meta.label }}
-          <span class="badge badge--ok">готово</span>
+          {{ last ? last.label || last.pipeline : 'ещё не запускался' }}
+          <span v-if="last" class="badge badge--ok">готово</span>
         </span>
       </div>
       <span class="strip__sep" aria-hidden="true" />
       <div class="strip__cell">
         <span class="strip__label">Индекс доверия</span>
-        <span class="strip__value strip__value--num">{{ formatIndex(indexNow) }}</span>
+        <span class="strip__value strip__value--num">
+          {{ last?.score?.index === undefined || last?.score?.index === null ? '—' : formatIndex(last.score.index) }}
+        </span>
       </div>
     </section>
   </main>
