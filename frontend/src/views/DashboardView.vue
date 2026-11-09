@@ -567,6 +567,11 @@ function downloadCurrent() {
   text-align: center;
 }
 
+/* Прогон — во всю ширину, как блок с графиками. */
+.dash > .runs {
+  grid-column: 1 / -1;
+}
+
 .dash__ask-hint {
   margin: 0;
   font-size: 13px;
