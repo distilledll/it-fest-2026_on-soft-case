@@ -5,6 +5,7 @@
 api_key в файле допустим (storage/ в .gitignore), но наружу через API никогда не отдаётся.
 """
 import asyncio
+from contextlib import AsyncExitStack
 import json
 import logging
 import time
@@ -16,7 +17,7 @@ from typing import Any, Literal
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.config import settings
 
@@ -35,9 +36,8 @@ class ModelProfile(BaseModel):
     extra_headers: str = ""          # "User-Agent=...;X-Foo=bar" — шлюз может резать дефолтный UA SDK
     temperature: float = 0.0         # для честного «было/стало» — 0
     max_tokens: int | None = None
-    # окно контекста модели в токенах (напр. 262144 у шлюза): от него считается, сколько текста закупки
-    # модель читает целиком, а с какого размера агент переходит на фрагменты (map-reduce)
-    context_tokens: int | None = None
+    context_tokens: int | None = Field(default=None, validation_alias=AliasChoices("context_tokens", "context_window"), ge=512, le=4_000_000)
+    concurrency: int = Field(default=5, ge=1, le=64)
     # По умолчанию рассуждения выключены (chat_template_kwargs.enable_thinking=false — vLLM/SGLang, Qwen3):
     # так советуют организаторы, ответ ~2 с вместо 20–40 с, точность агент добирает проверками.
     # Для API, которые не знают этого поля (напр. OpenAI), ставьте false.
@@ -66,6 +66,7 @@ class ModelProfile(BaseModel):
 
     def public(self) -> dict:
         d = self.model_dump(exclude={"api_key"})
+        d["context_window"] = self.context_tokens
         d["has_key"] = bool(self.resolve_key())
         return d
 
@@ -125,7 +126,8 @@ def load() -> Registry:
     if settings.llm_base_url and settings.llm_model:
         prof = ModelProfile(id="default", name="По умолчанию (.env)", base_url=settings.llm_base_url,
                             model=settings.llm_model, api_key_env=settings.llm_api_key_env,
-                            extra_headers=settings.llm_extra_headers)
+                            extra_headers=settings.llm_extra_headers, context_tokens=settings.llm_context_tokens,
+                            max_tokens=settings.llm_max_tokens)
         reg.profiles.append(prof)
         reg.roles = {"answer": "default", "critic": "default"}
     if settings.embed_model:
@@ -169,6 +171,7 @@ def resolve_roles(overrides: dict[str, str] | None = None) -> dict[str, ModelPro
 # Шлюз может ограничивать число одновременных запросов на организацию (у нас — 1). Один семафор на процесс
 # для всех ролей и всех прогонов; повтор после 429 с паузой, которую называет сам шлюз.
 _slots: dict[int, asyncio.Semaphore] = {}
+_pslots: dict[tuple[int, str, int], asyncio.Semaphore] = {}
 RETRY_AFTER_RE = re.compile(r"retry after (\d+(?:\.\d+)?)\s*s", re.I)
 RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
 
@@ -202,8 +205,16 @@ def _slot() -> asyncio.Semaphore:
     return _slots[loop_id]
 
 
-async def call(fn, *args, **kw):
-    """Вызов API с общим лимитом параллельности и повторами.
+def _profile_slot(p: ModelProfile) -> asyncio.Semaphore:
+    """Личный лимит профиля: свой семафор на (loop, профиль, заявленный лимит)."""
+    key = (id(asyncio.get_running_loop()), p.id, max(1, p.concurrency))
+    if key not in _pslots:
+        _pslots[key] = asyncio.Semaphore(key[2])
+    return _pslots[key]
+
+
+async def call(fn, *args, profile: ModelProfile | None = None, **kw):
+    """Вызов API с общим и личным (профиля) лимитами параллельности и повторами.
     - 429 — до llm_retries раз с паузой, которую называет шлюз (это просто очередь);
     - тайм-аут одного запроса — не больше 2 повторов, иначе зависший вопрос держит прогон;
     - обрыв связи / 5xx — шлюз недоступен: общая пауза для всех запросов, ждём до llm_outage_s."""
@@ -214,7 +225,10 @@ async def call(fn, *args, **kw):
         if pause > 0:                                   # шлюз лежит — ждём вместе со всеми
             await asyncio.sleep(pause)
             waited += pause
-        async with _slot():
+        async with AsyncExitStack() as gate:
+            if profile is not None:
+                await gate.enter_async_context(_profile_slot(profile))   # личный лимит профиля
+            await gate.enter_async_context(_slot())
             await _throttle()
             try:
                 result = await fn(*args, **kw)
@@ -255,7 +269,7 @@ async def chat(profile: ModelProfile, messages: list[dict], json: bool = False, 
     if profile.reasoning_effort:
         kw.setdefault("reasoning_effort", profile.reasoning_effort)
     temperature = kw.pop("temperature", profile.temperature)
-    resp = await call(profile.client().chat.completions.create,
+    resp = await call(profile.client().chat.completions.create, profile=profile,
                       model=profile.model, messages=messages, temperature=temperature,
                       max_tokens=profile.max_tokens, extra_body=profile.body() or None, **kw)
     return resp.choices[0].message.content or ""
@@ -293,7 +307,7 @@ async def embed(profile: ModelProfile, texts: list[str], task: str | None = None
         extra["dimensions"] = dimensions
     out: list[list[float]] = []
     for i in range(0, len(texts), 64):
-        resp = await call(profile.client().embeddings.create,
+        resp = await call(profile.client().embeddings.create, profile=profile,
                           model=profile.model, input=texts[i:i + 64], encoding_format="float", extra_body=extra or None)
         out += [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
     return out

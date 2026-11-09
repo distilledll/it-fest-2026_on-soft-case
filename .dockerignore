@@ -6,3 +6,11 @@ storage
 **/.env
 *.zip
 .git
+**/.git
+.idea
+.cache
+results
+school21-onsoft-data
+data/sample
+**/dist
+*.pdf

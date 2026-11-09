@@ -42,3 +42,23 @@ class BaselinePipeline:
         yield TraceStep(node="answer", ok=True, message=prof.model, data={"raw": raw[:500]})
         yield Answer(id=q.id, status=Status.ANSWER, answer=str(j.get("answer", "")), quote=str(j.get("quote", "")),
                      file=str(j.get("file", "")), llm_calls=1)
+
+
+class DirectPipeline(BaselinePipeline):
+    """Контрольный прямой запрос с тем же набором допустимых статусов, что у агента."""
+    name = "direct"
+
+    async def stream(self, q: Question, docs: list[Document], ctx: Context):
+        prompt = ("Ответь на вопрос по приложенным документам одной закупки. Верни JSON со строковыми полями "
+                  "status, answer, quote, file. Допустимые статусы: «ответ», «расхождение», «нет в документах», "
+                  "«не знаю». В answer приведи ответ, при расхождении — оба значения. Для ответа или расхождения "
+                  "укажи дословную цитату и имя файла. Для остальных статусов оставь answer, quote и file пустыми.")
+        raw = await chat(ctx.model("answer"), json=True, messages=[
+            {"role": "user", "content": f"{prompt}\n\n{render_docs(docs)}\n\nВопрос: {q.question}"}])
+        try:
+            data = parse_json(raw)
+            answer = Answer(id=q.id, **{k: data[k] for k in ("status", "answer", "quote", "file")}, llm_calls=1)
+        except (ValueError, KeyError, TypeError):
+            answer = Answer(id=q.id, status=Status.UNKNOWN, llm_calls=1)
+        yield TraceStep(node="answer", message="Один запрос по всей закупке")
+        yield answer

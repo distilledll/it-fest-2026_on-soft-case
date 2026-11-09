@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import llm
 from app.api import ask, datasets, models, out, runs
-from app.config import settings
+from app.config import ROOT, settings
 from app.pipeline.base import available
 
 settings.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -35,3 +37,16 @@ def health():
     reg = llm.load()
     return {"ok": True, "default_pipeline": settings.pipeline, "pipelines": available(),
             "roles": {r: next((p.model for p in reg.profiles if p.id == pid), None) for r, pid in reg.roles.items()}}
+
+
+# В production Vue и API обслуживаются с одного адреса.
+web_dir = ROOT / "frontend" / "dist"
+if (web_dir / "index.html").is_file():
+    @app.get("/login", include_in_schema=False)
+    @app.get("/dashboard", include_in_schema=False)
+    @app.get("/upload", include_in_schema=False)
+    @app.get("/settings", include_in_schema=False)
+    def frontend_page():
+        return FileResponse(web_dir / "index.html")
+
+    app.mount("/", StaticFiles(directory=web_dir, html=True), name="frontend")

@@ -39,10 +39,7 @@ def path_of(dataset_id: str) -> Path:
 
 
 def checker_for(data_dir: Path) -> tuple[Path, str]:
-    """Чем оценивать прогон: check.py из архива (если его положили) или эталонный из репозитория."""
-    own = data_dir / "check.py"
-    if own.is_file():
-        return own, "из архива"
+    """Все наборы оцениваются установленным оценщиком организатора."""
     return settings.checker, "эталонный (backend/eval/check.py)"
 
 
@@ -137,6 +134,8 @@ def from_zip(data: bytes, name: str) -> str:
 
 def from_files(files: list[tuple[str, bytes]], name: str, package: str = "P01") -> str:
     """Загрузка отдельных .txt — одна закупка, вопросы будут строкой ввода."""
+    if not package or PurePosixPath(package).name != package or package in (".", "..") or "\\" in package:
+        raise DatasetError("имя закупки должно быть именем одной папки")
     did, dest = _new_dir(name)
     for fname, data in files:
         if fname.lower().endswith(".txt"):
@@ -168,6 +167,10 @@ def subset(dataset_id: str, ids: list[str], name: str) -> str:
     did, dest = _new_dir(name)
     with open(src / "questions.csv", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f, delimiter=";") if r["id"] in want]
+    available = set(info(dataset_id)["packages"])
+    if any(row["package"] not in available for row in rows):
+        shutil.rmtree(dest)
+        raise DatasetError("неизвестная закупка в questions.csv")
     if not rows:
         shutil.rmtree(dest)
         raise DatasetError("ни одного вопроса из списка нет в датасете")

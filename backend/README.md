@@ -5,7 +5,7 @@
 ```bash
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev,agent]"
-cp .env.example .env                      # LLM_BASE_URL / LLM_MODEL / LLM_API_KEY
+cp .env.example .env                      # заполнить BRIDGE_API_KEY
 .venv/bin/uvicorn app.main:app --reload   # http://localhost:8000/docs
 .venv/bin/pytest -q
 ```
@@ -15,9 +15,9 @@ cp .env.example .env                      # LLM_BASE_URL / LLM_MODEL / LLM_API_K
 ### CLI
 
 ```bash
-python -m app.cli run --pipeline baseline --no-guard --label "было"     # точка «было» на примере
-python -m app.cli run --pipeline agent --label "стало: критики"         # «стало»
-python -m app.cli run --data /путь/к/контрольному.zip --pipeline agent --out answers.csv   # день защиты
+python -m app.cli run --pipeline direct --no-guard --label "было"     # точка «было» на примере
+python -m app.cli run --pipeline hybrid --label "стало: агент + TrustQA"         # «стало»
+python -m app.cli run --data /путь/к/контрольному.zip --pipeline hybrid --out answers.csv   # день защиты
 python -m app.cli run ... --role answer=<profile> --role critic=<profile>                   # другие модели
 python -m app.cli runs      # история прогонов с индексом доверия
 python -m app.cli models    # профили моделей и роли
@@ -100,8 +100,7 @@ map-reduce — 100, 738 запросов, ~6 мин при 2 запросах/с
 
 ### Оценка
 
-`check.py` из архива датасета, если он там есть; иначе эталонный `eval/check.py` (пример организатора).
-Чем оценён прогон — `meta.score.checker`. Внимание: `check.py` из архива — это код, который сервер выполняет.
+Все наборы оценивает установленный `backend/eval/check.py` организатора. Источник указан в `meta.score.checker`.
 
 ## Агент
 

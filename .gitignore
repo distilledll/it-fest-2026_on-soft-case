@@ -16,3 +16,9 @@ dist/
 data/*
 !data/README.md
 backend/eval/large/
+
+.idea/
+.cache/
+results/
+school21-onsoft-data/
+build/

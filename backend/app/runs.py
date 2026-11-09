@@ -20,7 +20,6 @@ from app.config import settings
 from app.ingest import load_package, load_questions
 from app.pipeline.base import Context, get_pipeline
 from app.schemas import Answer, Question, Status, TraceStep
-from app.verify import guard
 
 log = logging.getLogger("runs")
 
@@ -58,7 +57,7 @@ def question_timeout(ctx: Context) -> float:
     return t
 
 
-async def answer_one(pipeline, q: Question, data_dir: Path, ctx: Context, use_guard: bool = True) -> Answer:
+async def answer_one(pipeline, q: Question, data_dir: Path, ctx: Context) -> Answer:
     docs = list(load_package(data_dir, q.package))
     t0 = time.perf_counter()
     try:
@@ -67,8 +66,6 @@ async def answer_one(pipeline, q: Question, data_dir: Path, ctx: Context, use_gu
     except Exception as e:  # прогон контрольного набора не должен падать из-за одного вопроса
         ans = Answer(id=q.id, status=Status.UNKNOWN,
                      trace=[TraceStep(node="error", ok=False, message=f"{type(e).__name__}: {e}"[:500])])
-    if use_guard:
-        ans = guard(ans, docs, q.question)
     ans.elapsed_s = round(time.perf_counter() - t0, 2)
     return ans
 
@@ -95,7 +92,7 @@ async def run_set(dataset_id: str, pipeline_name: str, label: str = "", use_guar
     out = settings.runs_dir / run_id
     out.mkdir(parents=True, exist_ok=True)
     ctx = make_context(roles, options)
-    pipeline = get_pipeline(pipeline_name)
+    pipeline = get_pipeline(pipeline_name, use_guard=use_guard)
     questions = load_questions(data_dir)
     meta = _meta(run_id, dataset_id, pipeline_name, label, use_guard, ctx)
     meta["n"] = len(questions)
@@ -106,7 +103,7 @@ async def run_set(dataset_id: str, pipeline_name: str, label: str = "", use_guar
     PROGRESS[run_id] = {"done": 0, "total": len(questions), "status": "running"}
     t0 = time.perf_counter()
     try:
-        answers = await _answer_all(pipeline, questions, data_dir, ctx, use_guard, out, run_id)
+        answers = await _answer_all(pipeline, questions, data_dir, ctx, out, run_id)
     except Exception as e:
         meta.update(status="failed", error=f"{type(e).__name__}: {e}")
         _write_meta(out, meta)
@@ -126,7 +123,7 @@ def is_failed(a: Answer) -> bool:
     return any(t.node == "error" and not (t.message or "").startswith(PERMANENT) for t in a.trace)
 
 
-async def _answer_all(pipeline, questions: list[Question], data_dir: Path, ctx: Context, use_guard: bool,
+async def _answer_all(pipeline, questions: list[Question], data_dir: Path, ctx: Context,
                       out: Path, run_id: str) -> list[Answer]:
     """Ответы на все вопросы + повтор упавших (сеть, тайм-аут) несколькими раундами с паузой.
     Каждый готовый ответ сразу дописывается в partial.jsonl — если процесс упадёт, `resume` продолжит с места."""
@@ -135,7 +132,7 @@ async def _answer_all(pipeline, questions: list[Question], data_dir: Path, ctx: 
 
     async def task(q):
         async with sem:
-            a = await answer_one(pipeline, q, data_dir, ctx, use_guard)
+            a = await answer_one(pipeline, q, data_dir, ctx)
         with open(partial, "a", encoding="utf-8") as f:
             f.write(a.model_dump_json() + "\n")
         if run_id in PROGRESS:
@@ -196,12 +193,12 @@ async def resume_run(run_id: str) -> dict:
     todo = [q for q in questions if q.id not in done or is_failed(done[q.id])]
     roles = {r: m["profile"] for r, m in meta.get("models", {}).items()}
     ctx = make_context(roles, meta.get("options"))
-    pipeline = get_pipeline(meta["pipeline"])
+    pipeline = get_pipeline(meta["pipeline"], use_guard=meta["guard"])
     meta.update(status="running", elapsed_s_before=meta.get("elapsed_s") or 0, resumed=len(todo))
     _write_meta(out, meta)
     PROGRESS[run_id] = {"done": len(questions) - len(todo), "total": len(questions), "status": "resume"}
     t0 = time.perf_counter()
-    fresh = await _answer_all(pipeline, todo, data_dir, ctx, meta["guard"], out, run_id) if todo else []
+    fresh = await _answer_all(pipeline, todo, data_dir, ctx, out, run_id) if todo else []
     done.update({a.id: a for a in fresh})
     answers = [done[q.id] for q in questions]
     return _finish(out, meta, answers, data_dir, time.perf_counter() - t0, run_id)

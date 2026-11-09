@@ -68,7 +68,7 @@ def test_checker_from_archive_or_repo():
     from app.config import settings
     own = datasets.from_zip(make_zip({"packages/P01/a.txt": "т".encode(), "check.py": b"print('RESULT {}')"}), "x")
     path, src = datasets.checker_for(datasets.path_of(own))
-    assert path.parent == datasets.path_of(own) and src == "из архива"
+    assert path == settings.checker and "эталонный" in src
     plain = datasets.from_zip(make_zip({"packages/P01/a.txt": "т".encode()}), "y")
     path, src = datasets.checker_for(datasets.path_of(plain))
     assert path == settings.checker and path.is_file() and "эталонный" in datasets.info(plain)["checker"]

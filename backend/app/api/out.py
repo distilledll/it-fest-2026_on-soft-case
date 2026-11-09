@@ -45,7 +45,7 @@ class DatasetInfo(Out):
     has_questions: bool = Field(description="есть questions.csv — можно запускать прогоны")
     has_gold: bool = Field(description="есть answers_public.json — прогоны оцениваются check.py")
     checker: str = Field("эталонный (backend/eval/check.py)",
-                         description="чем оцениваются прогоны: check.py «из архива» или эталонный из репозитория")
+                         description="установленный оценщик организатора")
 
 
 class DatasetDetail(DatasetInfo):
@@ -63,6 +63,8 @@ class ModelProfileOut(Out):
     extra_headers: str = ""
     temperature: float = 0.0
     max_tokens: int | None = None
+    concurrency: int = 5
+    context_window: int | None = None
     context_tokens: int | None = Field(None, description="окно контекста модели в токенах; не задано — "
                                                          "закупка до 60000 символов читается целиком")
     disable_thinking: bool = Field(True, description="выключить рассуждения (по умолчанию да)")
@@ -106,7 +108,7 @@ class Score(Out):
     lies: int | None = Field(None, description="обманы — минус балл")
     index: float | None = Field(None, description="индекс доверия = (верно − обман) / всего × 100")
     by_type: dict[str, ByType] = Field(default_factory=dict, description="тип вопроса → вердикты")
-    checker: str | None = Field(None, description="чем оценено: «из архива» или эталонный check.py")
+    checker: str | None = Field(None, description="установленный оценщик организатора")
     error: str | None = None
 
 

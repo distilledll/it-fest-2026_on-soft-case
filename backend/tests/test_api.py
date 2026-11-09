@@ -108,3 +108,16 @@ def test_old_profiles_get_kind():
     from app.llm import ModelProfile
     assert ModelProfile.model_validate({"name": "e", "base_url": "x", "model": "cifra48/embedding"}).kind == "embedding"
     assert ModelProfile.model_validate({"name": "l", "base_url": "x", "model": "cifra48/llm"}).kind == "chat"
+
+
+def test_frontend_profile_context_reaches_agent():
+    from app.llm import get
+    from app.pipeline.agent.graph import context_budget
+    from app.pipeline.base import Context
+
+    r = c.post("/api/models", json={"id": "ui", "name": "ui", "base_url": "http://test", "model": "m",
+                                    "context_window": 8192, "concurrency": 2})
+    assert r.status_code == 201 and r.json()["context_tokens"] == 8192
+    r = c.patch("/api/models/ui", json={"context_tokens": 16384, "concurrency": 3})
+    assert r.json()["context_window"] == 16384 and r.json()["concurrency"] == 3
+    assert context_budget(Context(models={"answer": get("ui")})) == 24576

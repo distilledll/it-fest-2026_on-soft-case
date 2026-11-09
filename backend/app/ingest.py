@@ -61,6 +61,8 @@ def load_document(path: Path, package: str) -> Document:
 
 @lru_cache
 def load_package(data_dir: Path, package: str) -> tuple[Document, ...]:
+    if not package or Path(package).name != package or package in (".", "..") or "\\" in package:
+        raise ValueError("некорректное имя закупки")
     pdir = data_dir / "packages" / package
     return tuple(load_document(f, package) for f in sorted(pdir.glob("*.txt")))
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Protocol
 
+from app.verify import guard
 from app.llm import ModelProfile
 from app.schemas import Answer, Document, Question, TraceStep
 
@@ -37,7 +38,9 @@ class Pipeline(Protocol):
 
 PIPELINES = {
     "stub": ("app.pipeline.stub", "StubPipeline", "Заглушка без модели"),
+    "direct": ("app.pipeline.baseline", "DirectPipeline", "Прямой запрос с четырьмя статусами"),
     "baseline": ("app.pipeline.baseline", "BaselinePipeline", "«Было»: один запрос, вся закупка, без проверок"),
+    "hybrid": ("app.pipeline.hybrid", "HybridPipeline", "Агент + TrustQA при ответе «не знаю»"),
     "agent": ("app.pipeline.agent", "AgentPipeline", "LangGraph: retrieve → ответ → критики → исправление"),
 }
 
@@ -54,11 +57,34 @@ def available() -> list[dict]:
     return out
 
 
-def get_pipeline(name: str) -> Pipeline:
+class GuardedPipeline:
+    def __init__(self, pipeline):
+        self.pipeline = pipeline
+        self.name = pipeline.name
+
+    async def answer(self, q, docs, ctx):
+        return guard(await self.pipeline.answer(q, docs, ctx), docs, q.question)
+
+    async def stream(self, q, docs, ctx):
+        async for item in self.pipeline.stream(q, docs, ctx):
+            if isinstance(item, Answer):
+                before = len(item.trace)
+                item = guard(item, docs, q.question)
+                for step in item.trace[before:]:
+                    yield step
+                item.trace = item.trace[:before]
+            yield item
+
+
+def get_pipeline(name: str, *, use_guard: bool = False) -> Pipeline:
     if name not in PIPELINES:
         raise ValueError(f"неизвестный пайплайн: {name}")
     mod, cls, _ = PIPELINES[name]
-    return getattr(import_module(mod), cls)()
+    factory = getattr(import_module(mod), cls)
+    if name == "hybrid":
+        return factory(get_pipeline("agent", use_guard=use_guard))
+    pipeline = factory()
+    return GuardedPipeline(pipeline) if use_guard else pipeline
 
 
 async def collect(stream: AsyncIterator[TraceStep | Answer]) -> Answer:

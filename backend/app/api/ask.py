@@ -10,7 +10,6 @@ from app.ingest import load_package
 from app.pipeline.base import get_pipeline
 from app.runs import answer_one, make_context
 from app.schemas import Answer, Question, TraceStep
-from app.verify import guard
 
 router = APIRouter(prefix="/api/ask", tags=["ask"])
 
@@ -40,7 +39,7 @@ def _prepare(body: AskIn):
     try:
         root = datasets.path_of(body.dataset)
         ctx = make_context(body.roles, body.options)
-        pipeline = get_pipeline(body.pipeline or settings.pipeline)
+        pipeline = get_pipeline(body.pipeline or settings.pipeline, use_guard=body.guard)
     except (DatasetError, KeyError, ValueError) as e:
         raise HTTPException(422, str(e))
     if body.package not in datasets.info(body.dataset)["packages"]:
@@ -51,7 +50,7 @@ def _prepare(body: AskIn):
 @router.post("", response_model=Answer)
 async def ask(body: AskIn):
     root, ctx, pipeline, q = _prepare(body)
-    return await answer_one(pipeline, q, root, ctx, body.guard)
+    return await answer_one(pipeline, q, root, ctx)
 
 
 @router.post("/stream", responses=SSE_DOC, response_class=EventSourceResponse)
@@ -66,11 +65,6 @@ async def ask_stream(body: AskIn):
             async for item in pipeline.stream(q, docs, ctx):
                 if isinstance(item, Answer):
                     item.trace = steps + item.trace
-                    if body.guard:
-                        before = len(item.trace)
-                        item = guard(item, docs, q.question)
-                        for s in item.trace[before:]:
-                            yield {"event": "step", "data": s.model_dump_json()}
                     yield {"event": "answer", "data": item.model_dump_json()}
                     return
                 steps.append(item)

@@ -55,6 +55,7 @@ class State(TypedDict, total=False):
     fragments: bool            # модель видит фрагменты, а не документы целиком
     researched: bool           # повторный поиск перед «нет в документах» уже был
     quotes_ready: bool         # шаг «сначала цитаты» выполнен (узел map)
+    incomplete_map: bool
     auto_map: bool             # map включён автоматически: закупка не влезла в контекст
     vote: dict | None          # итог голосования (опция votes)
     critic_ok: bool
@@ -198,7 +199,7 @@ async def _quote_first(state: State, docs: list[Document], ctx) -> tuple[list[di
     step = TraceStep(node="extract", ok=kept > 0,
                      message=f"{mode}: запросов {calls}, проверено {kept}, отброшено (нет в документах/инъекция) {dropped}"
                              + (f", старая редакция скрыта: {stale}" if stale else "") + (f". {coverage}" if coverage else ""),
-                     data={"quotes": lines})
+                     data={"quotes": lines, "complete": read_all if map_mode else None})
     return msgs, [step], calls
 
 
@@ -241,19 +242,21 @@ async def _map_extract(question: str, docs: list[Document], ctx) -> tuple[list[d
         chunks = picked
     prof = ctx.model("answer")
 
-    async def read(doc: Document, text: str) -> list[dict]:
+    async def read(doc: Document, text: str) -> list[dict] | None:
         shown, _ = redact(text)
         raw = await llm.chat(prof, json=True, messages=[{"role": "user", "content": prompts.MAP_CHUNK.format(
             file=doc.file, question=question, chunk=shown)}])
         try:
-            qs = llm.parse_json(raw).get("quotes", [])
+            qs = llm.parse_json(raw).get("quotes")
         except (ValueError, TypeError, AttributeError):
-            return []
+            return None
+        if not isinstance(qs, list):
+            return None
         return [{"file": doc.file, "quote": str(q.get("quote") if isinstance(q, dict) else q)} for q in qs if q]
 
     found = await asyncio.gather(*(read(d, t) for d, t in chunks), return_exceptions=True)
     got = [q for r in found if isinstance(r, list) for q in r]
-    return got, len(chunks), read_all
+    return got, len(chunks), read_all and all(isinstance(r, list) for r in found)
 
 
 MONTH_DATE = re.compile(r"(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[яй]|июн\w*|июл\w*|август\w*|"
@@ -335,10 +338,10 @@ async def map_node(state: State, config) -> dict:
     st = {**state, "auto_map": auto}
     msgs, steps, calls = await _quote_first(st, docs, ctx)
     if auto:
-        steps = [TraceStep(node="map", ok=None, message="закупка не влезает в контекст модели — читаем её "
-                                                         "целиком по фрагментам (map-reduce)")] + steps
+        steps = [TraceStep(node="map", ok=None, message="закупка не влезает в контекст модели — читаем по фрагментам")] + steps
     # map уже прочитал закупку целиком (или лучшие фрагменты всех файлов) — повторный поиск не нужен
-    return {"messages": msgs, "quotes_ready": True, "auto_map": auto, "researched": True,
+    return {"messages": msgs, "incomplete_map": any(step.data.get("complete") is False for step in steps),
+            "quotes_ready": True, "auto_map": auto, "researched": True,
             "llm_calls": state["llm_calls"] + calls, "trace": steps}
 
 
@@ -456,6 +459,9 @@ async def retry(state: State, config) -> dict:
 
 async def finalize(state: State, config) -> dict:
     d = state.get("draft")
+    if d and d.status == "нет в документах" and state.get("incomplete_map"):
+        return {"final": Draft(status="не знаю"), "trace": [TraceStep(
+            node="coverage", ok=False, message="Часть фрагментов не проверена. Отсутствие не подтверждено.")]}
     # warn по расхождению, оставшийся после исчерпания попыток, — тоже не сдаём: пропущенное расхождение = обман
     # Неразрешённое расхождение по собственным evidence модели — не сдаём. Подозрение от сверки кодом
     # (crosscheck) — тоже, но только если критик-модель не подтвердил, что это другой параметр.

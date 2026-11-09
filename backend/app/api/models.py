@@ -4,7 +4,7 @@ import time
 from fastapi import APIRouter, HTTPException
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 from app import llm
 from app.api import out
@@ -39,10 +39,11 @@ class ProfilePatch(BaseModel):
     extra_headers: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
-    context_tokens: int | None = None
+    context_tokens: int | None = Field(default=None, validation_alias=AliasChoices("context_tokens", "context_window"), ge=512, le=4_000_000)
+    concurrency: int | None = Field(default=None, ge=1, le=64)
     disable_thinking: bool | None = None
     json_mode: bool | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: str | None = None   # low | medium | high; пустая строка — выключить
     extra_body: dict | None = None
     agent_options: dict | None = None
     kind: Literal["chat", "embedding"] | None = None

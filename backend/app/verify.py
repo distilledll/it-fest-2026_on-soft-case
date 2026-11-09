@@ -93,7 +93,7 @@ def nearby(quote: str, docs: list[Document], file: str = "", width: int = 250) -
 def guard(ans: Answer, docs: list[Document], question: str = "") -> Answer:
     """Финальные правила. Если проверка не прошла и починить нельзя — честное «не знаю»."""
     if ans.status in (Status.ABSENT, Status.UNKNOWN):
-        return ans
+        return ans.model_copy(update={"answer": "", "quote": "", "file": ""})
 
     doc = quote_exists(ans.quote, docs)
     if doc is None:

@@ -25,13 +25,14 @@ dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6"]
 
 [project.scripts]
 onsoft = "app.cli:main"
+trustqa = "trustqa.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "trustqa*"]
 
 [tool.ruff]
 line-length = 110
