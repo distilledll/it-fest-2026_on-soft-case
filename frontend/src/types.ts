@@ -88,7 +88,42 @@ export interface RunMeta {
   progress?: { done: number; total: number; status: string }
   models?: Record<string, RunModelRef>
   options?: Record<string, unknown>
+  ladder?: LadderRef
   error?: string
+}
+
+/** meta.ladder у прогона: к какой лесенке «было → стало» и какому шагу он относится. */
+export interface LadderRef {
+  id: string
+  step: string
+  title: string
+  order: number
+}
+
+/** Шаг из GET /api/ladders — готово для графика вклада слоёв. */
+export interface LadderStep {
+  step: string
+  title: string
+  order: number
+  run_id: string
+  status: RunMeta['status']
+  index: number | null
+  correct?: number | null
+  careful?: number | null
+  lies?: number | null
+  n?: number | null
+  by_type?: Record<string, Record<string, number>>
+  llm_calls?: number
+  elapsed_s?: number
+}
+
+/** GET /api/ladders */
+export interface Ladder {
+  id: string
+  dataset: string
+  dataset_name?: string
+  models?: Record<string, RunModelRef> | null
+  steps: LadderStep[]
 }
 
 /** GET /api/runs/compare/{before}/{after} */

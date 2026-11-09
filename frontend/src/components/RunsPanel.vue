@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '@/components/AppIcon.vue'
@@ -11,7 +11,19 @@ import { useRuns } from '@/composables/useRuns'
 import { agoLabel, shortTime } from '@/utils/presentation'
 import type { DatasetInfo, HealthInfo, RunMeta } from '@/types'
 
-const { runs, running, loading, error, loadedAt, refresh, start } = useRuns()
+const {
+  runs,
+  running,
+  loading,
+  error,
+  loadedAt,
+  refresh,
+  start,
+  startBoth,
+  ladderId,
+  ladderRuns,
+  ladderRunning,
+} = useRuns()
 const { active } = useDataset()
 const route = useRoute()
 const router = useRouter()
@@ -23,6 +35,7 @@ const pipeline = ref('')
 const label = ref('')
 const guard = ref(true)
 const busy = ref(false)
+const bothBusy = ref(false)
 const problem = ref('')
 const notice = ref('')
 const ready = ref(false)
@@ -31,9 +44,28 @@ const now = ref(Date.now())
 let tick: number | undefined
 
 const runnable = computed(() => datasets.value.filter((d) => d.has_questions))
-const canStart = computed(
-  () => !!datasetId.value && !!pipeline.value && !busy.value && runnable.value.some((d) => d.id === datasetId.value),
-)
+const datasetChosen = computed(() => runnable.value.some((d) => d.id === datasetId.value))
+const canStartBoth = computed(() => datasetChosen.value && !bothBusy.value && !ladderRunning.value)
+const canStart = computed(() => datasetChosen.value && !!pipeline.value && !busy.value)
+const ladderTotal = 2
+const ladderPct = computed(() => {
+  if (!ladderId.value) return 0
+  const settled = ladderRuns.value.filter((r) => r.status !== 'running').length
+  return Math.round((Math.min(settled, ladderTotal) / ladderTotal) * 100)
+})
+/** Два шага лесенки по порядку: «было» (baseline) и «стало» (полный агент). */
+const LADDER_LABELS: Record<string, string> = {
+  baseline: 'Было · один запрос, всё скопом',
+  full: 'Стало · полный агент с проверками',
+}
+const ladderSteps = computed(() => {
+  const byStep = new Map(ladderRuns.value.map((r) => [r.ladder?.step, r]))
+  return (['baseline', 'full'] as const).map((step) => ({
+    step,
+    title: LADDER_LABELS[step] ?? step,
+    run: byStep.get(step) ?? null,
+  }))
+})
 const currentWithoutRuns = computed(
   () =>
     !!active.value &&
@@ -92,6 +124,29 @@ async function onStart() {
   }
 }
 
+/** Главная кнопка: выбрать только датасет — оба конвейера («было» и «стало») пойдут по очереди. */
+async function onStartBoth() {
+  problem.value = ''
+  notice.value = ''
+  bothBusy.value = true
+  try {
+    await startBoth(datasetId.value)
+  } catch (e) {
+    problem.value = e instanceof ApiError ? e.message : 'не удалось запустить измерение'
+  } finally {
+    bothBusy.value = false
+  }
+}
+
+// Лесенка завершилась (шаги разошлись по статусам) — честно докладываем итог.
+watch(ladderId, (id, prev) => {
+  if (id || !prev) return
+  const failed = runs.value.filter((r) => r.ladder?.id === prev && r.status !== 'done').length
+  notice.value = failed
+    ? 'Лесенка завершилась с ошибками — статусы прогонов ниже'
+    : 'Готово: «было» и «стало» прогнаны — дашборд подхватил пару'
+})
+
 const formEl = ref<HTMLDivElement | null>(null)
 
 onMounted(async () => {
@@ -104,7 +159,7 @@ onMounted(async () => {
     await nextTick()
     formEl.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     formEl.value?.querySelector<HTMLSelectElement>('select')?.focus({ preventScroll: true })
-    const { start: _start, dataset: _ds, ...rest } = route.query
+    const { start: _start, dataset: _ds, pipeline: _pl, ...rest } = route.query
     void router.replace({ query: rest })
   }
   tick = window.setInterval(() => (now.value = Date.now()), 1000)
@@ -153,32 +208,71 @@ onBeforeUnmount(() => clearInterval(tick))
         <span class="field__hint">Прогон возможен только с <span class="mono">questions.csv</span>.</span>
       </label>
 
-      <label class="field">
-        <span class="field__label">Пайплайн</span>
-        <select v-model="pipeline" class="select">
-          <option v-for="p in health?.pipelines ?? []" :key="p.name" :value="p.name" :disabled="!p.available">
-            {{ p.title }}
-          </option>
-        </select>
-        <span class="field__hint">baseline — «как есть», agent — с проверками.</span>
-      </label>
-
-      <label class="field">
-        <span class="field__label">Подпись прогона</span>
-        <input v-model="label" class="input" type="text" placeholder="стало: критики" />
-        <span class="field__hint">Видно в сравнении «было / стало».</span>
-      </label>
-
       <div class="runs__go">
-        <label class="runs__guard">
-          <input v-model="guard" type="checkbox" />
-          проверки кодом
-        </label>
-        <button class="btn btn--primary" type="button" :disabled="!canStart" @click="onStart">
-          {{ busy ? 'Запускаем…' : 'Запустить прогон' }}
+        <button class="btn btn--primary" type="button" :disabled="!canStartBoth" @click="onStartBoth">
+          {{ bothBusy ? 'Запускаем…' : ladderRunning ? 'Идёт измерение…' : 'Прогнать «было → стало»' }}
         </button>
+        <span class="field__hint">
+          Один запуск — два прогона по очереди на одном датасете: «как есть» и полный агент.
+        </span>
       </div>
     </div>
+
+    <div v-if="ladderId" class="ladder">
+      <div class="progress ladder__bar" aria-hidden="true">
+        <div class="progress__bar" :style="{ width: `${ladderPct}%` }" />
+      </div>
+      <ul class="ladder__steps">
+        <li v-for="st in ladderSteps" :key="st.step" class="ladder__step">
+          <span
+            class="badge"
+            :class="
+              st.run?.status === 'done'
+                ? 'badge--ok'
+                : st.run?.status === 'running'
+                  ? 'badge--accent'
+                  : st.run
+                    ? 'badge--bad'
+                    : ''
+            "
+          >
+            {{ st.run ? st.run.status : 'в очереди' }}
+          </span>
+          <span :class="{ 'ladder__title--now': st.run?.status === 'running' }">{{ st.title }}</span>
+        </li>
+      </ul>
+    </div>
+
+    <details class="runs__adv">
+      <summary class="runs__adv-sum">Одиночный прогон — выбрать один пайплайн вручную</summary>
+      <div class="runs__form runs__form--adv">
+        <label class="field">
+          <span class="field__label">Пайплайн</span>
+          <select v-model="pipeline" class="select">
+            <option v-for="p in health?.pipelines ?? []" :key="p.name" :value="p.name" :disabled="!p.available">
+              {{ p.title }}
+            </option>
+          </select>
+          <span class="field__hint">baseline — «как есть», agent — с проверками.</span>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Подпись прогона</span>
+          <input v-model="label" class="input" type="text" placeholder="стало: критики" />
+          <span class="field__hint">Видно в сравнении «было / стало».</span>
+        </label>
+
+        <div class="runs__go">
+          <label class="runs__guard">
+            <input v-model="guard" type="checkbox" />
+            проверки кодом
+          </label>
+          <button class="btn btn--ghost" type="button" :disabled="!canStart" @click="onStart">
+            {{ busy ? 'Запускаем…' : 'Запустить прогон' }}
+          </button>
+        </div>
+      </div>
+    </details>
 
     <p v-if="problem" class="runs__msg runs__msg--bad">
       <AppIcon name="alert" size="sm" /> {{ problem }}
@@ -309,5 +403,50 @@ onBeforeUnmount(() => clearInterval(tick))
 
 .runs__bar {
   margin-top: 4px;
+}
+
+.ladder {
+  display: grid;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.ladder__bar {
+  height: 8px;
+}
+
+.ladder__steps {
+  list-style: none;
+  display: grid;
+  gap: var(--s-2);
+}
+
+.ladder__step {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 13.5px;
+}
+
+.ladder__title--now {
+  font-weight: 600;
+}
+
+.runs__adv {
+  margin-top: var(--s-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--s-3);
+}
+
+.runs__adv-sum {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.runs__form--adv {
+  border-bottom: none;
+  padding-bottom: 0;
+  padding-top: var(--s-4);
 }
 </style>

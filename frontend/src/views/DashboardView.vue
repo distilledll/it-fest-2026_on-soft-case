@@ -5,13 +5,15 @@ import AppIcon from '@/components/AppIcon.vue'
 import BeforeAfterChart from '@/components/BeforeAfterChart.vue'
 import RunsPanel from '@/components/RunsPanel.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
+import { listDatasets } from '@/api/datasets'
 import { ApiError } from '@/api/http'
 import { answersCsvUrl, compareRuns } from '@/api/runs'
 import { useCountUp } from '@/composables/useCountUp'
+import { useDataset } from '@/composables/useDataset'
 import { useRuns } from '@/composables/useRuns'
-import { formatIndex, shortTime, signed } from '@/utils/presentation'
+import { formatIndex, signed } from '@/utils/presentation'
 import { indexOfRow, indexOfType, shareOf, sumOf, sumVerdicts } from '@/utils/score'
-import type { CompareResult, RunMeta, Status, TypeBreakdown } from '@/types'
+import type { CompareResult, DatasetInfo, RunMeta, Status, TypeBreakdown } from '@/types'
 
 /** Минимум, который нужен экрану от прогона: разбивка по типам, индекс и метаданные. */
 interface RunView {
@@ -55,33 +57,75 @@ const EMPTY_VIEW: RunView = {
   index: null,
 }
 
-const { finished, byId, refresh } = useRuns()
+const { finished, loading, refresh } = useRuns()
+const { active, setActive } = useDataset()
 
-const beforeId = ref('')
-const afterId = ref('')
-const autoPick = ref(true)
+const datasets = ref<DatasetInfo[]>([])
+const datasetId = ref('')
 const pair = ref<CompareResult | null>(null)
 const pairError = ref('')
 
-/* «было» — самый старый готовый прогон, «стало» — самый свежий; выбор можно поменять руками. */
-watch(
-  finished,
-  (list) => {
-    if (!list.length) {
-      beforeId.value = ''
-      afterId.value = ''
-      return
-    }
-    const byTime = [...list].sort(
-      (a, b) => a.created_at.localeCompare(b.created_at) || a.run_id.localeCompare(b.run_id),
+/* Пара «было → стало» берётся автоматически: сначала последняя лесенка датасета
+   (baseline + полный агент), иначе самый свежий baseline и самый свежий agent. */
+const dsFinished = computed(() => finished.value.filter((r) => r.dataset === datasetId.value))
+const pairIds = computed<{ before: string; after: string } | null>(() => {
+  const list = [...dsFinished.value].sort(
+    (a, b) => a.created_at.localeCompare(b.created_at) || a.run_id.localeCompare(b.run_id),
+  )
+  const ladders = new Map<string, RunMeta[]>()
+  for (const r of list) {
+    if (!r.ladder) continue
+    ladders.set(r.ladder.id, [...(ladders.get(r.ladder.id) ?? []), r])
+  }
+  for (const [, rs] of [...ladders.entries()].reverse()) {
+    const before = rs.find((r) => r.ladder?.step === 'baseline')
+    const after = rs.reduce<RunMeta | null>(
+      (acc, r) => ((r.ladder?.order ?? 0) > (acc?.ladder?.order ?? -1) && r !== before ? r : acc),
+      null,
     )
-    if (autoPick.value || !byId(beforeId.value) || !byId(afterId.value)) {
-      afterId.value = byTime[byTime.length - 1]!.run_id
-      beforeId.value = byTime[0]!.run_id
-    }
-  },
-  { immediate: true },
+    if (before && after) return { before: before.run_id, after: after.run_id }
+  }
+  /* Лесенки нет: «было» — самый свежий baseline (иначе самый старый прогон),
+     «стало» — самый свежий не-baseline (иначе самый свежий вообще). */
+  let before = [...list].reverse().find((r) => r.pipeline === 'baseline') ?? list[0]
+  let after = [...list].reverse().find((r) => r.pipeline !== 'baseline') ?? list[list.length - 1]
+  if (before === after) {
+    before = list[0]!
+    after = list[list.length - 1]!
+  }
+  return before && after && before !== after ? { before: before.run_id, after: after.run_id } : null
+})
+const beforeId = computed(() => pairIds.value?.before ?? '')
+const afterId = computed(() => pairIds.value?.after ?? '')
+const currentDsName = computed(
+  () => datasets.value.find((d) => d.id === datasetId.value)?.name ?? dsFinished.value[0]?.dataset_name ?? '',
 )
+
+async function loadDatasets() {
+  try {
+    datasets.value = await listDatasets()
+  } catch {
+    datasets.value = []
+  }
+  if (datasetId.value && datasets.value.some((d) => d.id === datasetId.value)) return
+  const withRuns = datasets.value.find((d) => finished.value.some((r) => r.dataset === d.id))
+  const first =
+    (active.value && datasets.value.some((d) => d.id === active.value!.id) ? active.value.id : '') ||
+    withRuns?.id ||
+    datasets.value[0]?.id ||
+    ''
+  if (first) {
+    datasetId.value = first
+    const info = datasets.value.find((d) => d.id === first)
+    if (info && info.id !== active.value?.id) setActive(info)
+  }
+}
+onMounted(loadDatasets)
+
+watch(datasetId, (id) => {
+  const info = datasets.value.find((d) => d.id === id)
+  if (info && info.id !== active.value?.id) setActive(info)
+})
 
 watch([beforeId, afterId], async ([b, a]) => {
   pairError.value = ''
@@ -165,9 +209,6 @@ const barLegend = computed(() => [
   `обман · ${totals.value.обман}`,
 ])
 
-const runTitle = (r: RunMeta) =>
-  `${r.label || r.dataset_name || r.dataset} · ${r.pipeline} · ${shortTime(r.created_at)}`
-
 const revealed = ref(false)
 onMounted(() => requestAnimationFrame(() => (revealed.value = true)))
 const barWidth = (pct: number) => ({ width: revealed.value ? `${pct}%` : '0%' })
@@ -193,20 +234,13 @@ function downloadCurrent() {
 
       <div class="pair">
         <label class="field pair__field">
-          <span class="field__label">прогон «было»</span>
-          <select v-model="beforeId" class="select" @change="autoPick = false">
-            <option value="" disabled>не выбран</option>
-            <option v-for="r in finished" :key="r.run_id" :value="r.run_id">{{ runTitle(r) }}</option>
+          <span class="field__label">датасет</span>
+          <select v-model="datasetId" class="select">
+            <option v-if="!datasets.length" value="" disabled>нет датасетов — загрузите архив</option>
+            <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }} · {{ d.id }}</option>
           </select>
         </label>
-        <label class="field pair__field">
-          <span class="field__label">прогон «стало»</span>
-          <select v-model="afterId" class="select" @change="autoPick = false">
-            <option value="" disabled>не выбран</option>
-            <option v-for="r in finished" :key="r.run_id" :value="r.run_id">{{ runTitle(r) }}</option>
-          </select>
-        </label>
-        <button class="btn btn--ghost btn--sm pair__refresh" type="button" @click="refresh()">
+        <button class="btn btn--ghost btn--sm pair__refresh" type="button" :disabled="loading" @click="refresh()">
           <AppIcon name="refresh" size="sm" />
           Обновить
         </button>
@@ -218,8 +252,11 @@ function downloadCurrent() {
     </p>
     <p v-else-if="!hasPair" class="dash__note">
       <AppIcon name="alert" size="sm" />
-      Пары прогонов для сравнения пока нет — запустите прогоны в блоке «Прогоны на сервере» и выберите
-      «было» и «стало».
+      <template v-if="datasetId">
+        Для датасета «{{ currentDsName }}» пока нет готовой пары «было → стало». Запустите
+        «Прогнать «было → стало»» — пара появится здесь автоматически.
+      </template>
+      <template v-else>Датасет не выбран — загрузите архив и выберите его, чтобы увидеть сравнение.</template>
     </p>
 
     <div class="dash">

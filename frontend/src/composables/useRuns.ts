@@ -1,5 +1,6 @@
 import { computed, onScopeDispose, ref } from 'vue'
 
+import { startLadder } from '@/api/ladders'
 import { startRun, listRuns, type RunStart } from '@/api/runs'
 import { ApiError } from '@/api/http'
 import type { RunMeta } from '@/types'
@@ -24,9 +25,10 @@ function reason(e: unknown): string {
   return e instanceof ApiError ? e.message : 'сервер не отвечает'
 }
 
-/** Пока хоть один прогон идёт — опрос каждые 2 секунды, иначе обновляемся по требованию. */
-function arm() {
-  const need = running.value.length > 0
+/** Пока идёт прогон или лесенка — опрос каждые 2 секунды, иначе обновляемся по требованию. */
+function arm(): void {
+  settleLadder()
+  const need = running.value.length > 0 || ladderId.value !== ''
   if (need && timer === undefined) timer = window.setInterval(() => void refresh(), RUNNING_EVERY)
   if (!need && timer !== undefined) {
     clearInterval(timer)
@@ -53,6 +55,41 @@ async function start(body: RunStart): Promise<string> {
   const { run_id } = await startRun(body)
   await refresh()
   return run_id
+}
+
+/* ------------------------------------------------- лесенка «было → стало» */
+
+/** Короткая лесенка: «было» (baseline) и «стало» (полный агент) — руками пайплайны выбирать не надо. */
+export const BOTH_STEPS = ['baseline', 'full'] as const
+
+const ladderId = ref('')
+let ladderDeadline = 0
+
+const ladderRuns = computed(() => (ladderId.value ? runs.value.filter((r) => r.ladder?.id === ladderId.value) : []))
+const ladderRunning = computed(() => ladderRuns.value.some((r) => r.status === 'running'))
+const ladderDoneCount = computed(() => ladderRuns.value.filter((r) => r.status === 'done').length)
+const ladderFailedCount = computed(() => ladderRuns.value.filter((r) => r.status === 'failed').length)
+
+/** Забыть лесенку: все шаги в финальном статусе — или ни один так и не родился (сервер не принял). */
+function settleLadder(): void {
+  if (!ladderId.value) return
+  const rs = ladderRuns.value
+  const allTerminal = rs.length >= BOTH_STEPS.length && rs.every((r) => r.status !== 'running')
+  const neverBorn = rs.length === 0 && Date.now() > ladderDeadline
+  if (allTerminal || neverBorn) ladderId.value = ''
+}
+
+/** «Было → стало» одним запуском: baseline и полный агент идут по очереди на одном датасете. */
+async function startBoth(dataset: string): Promise<string> {
+  const { ladder_id } = await startLadder({ dataset, steps: [...BOTH_STEPS] })
+  ladderId.value = ladder_id
+  ladderDeadline = Date.now() + 30_000
+  await refresh()
+  return ladder_id
+}
+
+function forgetLadder(): void {
+  ladderId.value = ''
 }
 
 const onVisible = () => {
@@ -92,6 +129,13 @@ export function useRuns() {
     loadedAt,
     refresh,
     start,
+    startBoth,
+    forgetLadder,
+    ladderId,
+    ladderRuns,
+    ladderRunning,
+    ladderDoneCount,
+    ladderFailedCount,
     byId: (id: string) => runs.value.find((r) => r.run_id === id) ?? null,
   }
 }
