@@ -145,16 +145,16 @@ onUnmounted(() => {
                 <option v-for="p in packages" :key="p" :value="p">{{ p }}</option>
               </select>
             </label>
-            <label class="field ask__text">
-              <span class="field__label">Вопрос</span>
-              <textarea
-                v-model="question"
-                class="textarea"
-                rows="2"
-                placeholder="Какой размер обеспечения заявки, в рублях?"
-              />
-            </label>
           </div>
+          <label class="field ask__text">
+            <span class="field__label">Вопрос</span>
+            <textarea
+              v-model="question"
+              class="textarea"
+              rows="2"
+              placeholder="Какой размер обеспечения заявки, в рублях?"
+            />
+          </label>
 
           <div class="ask__actions">
             <button class="btn btn--primary" type="submit" :disabled="!canAsk">
@@ -218,12 +218,17 @@ onUnmounted(() => {
 
 .ask__row {
   display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: var(--s-3);
   align-items: end;
 }
 
 .ask__pick {
-  max-width: 200px;
+  min-width: 0;
+}
+
+.ask__text {
+  width: 100%;
 }
 
 .ask__actions {
@@ -337,13 +342,9 @@ onUnmounted(() => {
   }
 }
 
-@media (min-width: 620px) {
+@media (max-width: 420px) {
   .ask__row {
-    grid-template-columns: 1fr 140px 1.6fr;
-  }
-
-  .ask__pick {
-    max-width: none;
+    grid-template-columns: 1fr;
   }
 }
 </style>
