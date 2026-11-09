@@ -7,14 +7,15 @@ import RunInsights from '@/components/RunInsights.vue'
 import RunsPanel from '@/components/RunsPanel.vue'
 import TypeHistogram from '@/components/TypeHistogram.vue'
 import { releaseAfter, releaseBefore, shortType } from '@/api/benchmark'
-import { listDatasets } from '@/api/datasets'
+import { getQuestions, listDatasets, uploadGold } from '@/api/datasets'
 import { ApiError } from '@/api/http'
-import { answersCsvUrl, compareRuns } from '@/api/runs'
+import { answersCsvUrl, compareRuns, getRun } from '@/api/runs'
 import { useAskModal } from '@/composables/useAskModal'
 import { useCountUp } from '@/composables/useCountUp'
 import { useDataset } from '@/composables/useDataset'
 import { useRuns } from '@/composables/useRuns'
 import { formatIndex, signed } from '@/utils/presentation'
+import { buildAgreement, type Agreement } from '@/utils/agreement'
 import { indexOfRow, indexOfType, shareOf, sumOf, sumVerdicts } from '@/utils/score'
 import type { CompareResult, DatasetInfo, RunMeta, Status, TypeBreakdown } from '@/types'
 
@@ -50,6 +51,12 @@ const datasets = ref<DatasetInfo[]>([])
 const datasetId = ref('')
 const pair = ref<CompareResult | null>(null)
 const pairError = ref('')
+/** Оценка «было» относительно «стало» — строится, когда эталонных ответов нет. */
+const agree = ref<Agreement | null>(null)
+const goldBusy = ref(false)
+const goldNote = ref('')
+const goldErr = ref('')
+const goldInput = ref<HTMLInputElement | null>(null)
 
 /* Пара «было → стало» берётся автоматически: сначала последняя лесенка датасета
    (baseline + полный агент), иначе самый свежий baseline и самый свежий agent. */
@@ -109,6 +116,8 @@ async function loadDatasets() {
 onMounted(loadDatasets)
 
 watch(datasetId, (id) => {
+  goldNote.value = ''
+  goldErr.value = ''
   const info = datasets.value.find((d) => d.id === id)
   if (info && info.id !== active.value?.id) setActive(info)
 })
@@ -119,28 +128,90 @@ const scoreSig = computed(() => {
   return `${s(beforeId.value)}|${s(afterId.value)}`
 })
 
-// immediate: при возврате на дашборд прогоны уже загружены и пара не меняется — сравнение нужно сразу
-watch([beforeId, afterId, scoreSig], async ([b, a]) => {
+async function loadPair(b: string, a: string) {
   pairError.value = ''
   if (!b || !a || b === a) {
     pair.value = null
+    agree.value = null
     return
   }
   try {
     const result = await compareRuns(b, a)
     // пока ждали ответ, выбор мог смениться — принимаем только актуальную пару
-    if (beforeId.value === b && afterId.value === a) pair.value = result
+    if (beforeId.value !== b || afterId.value !== a) return
+    pair.value = result
+    agree.value = null
+    if (!scoredOf(result.before) || !scoredOf(result.after)) await loadAgreement(b, a)
   } catch (e) {
     if (beforeId.value !== b || afterId.value !== a) return
     pair.value = null
+    agree.value = null
     pairError.value = e instanceof ApiError ? e.message : 'не удалось получить сравнение прогонов'
   }
-}, { immediate: true })
+}
 
-const before = computed<RunView>(() => (pair.value ? viewOf(pair.value.before) : viewOf(releaseBefore)))
-const after = computed<RunView>(() => (pair.value ? viewOf(pair.value.after) : viewOf(releaseAfter)))
+/** Оценка без эталона: ответы «стало» считаем верными, «было» сверяем с ними по вопросам обоих прогонов. */
+async function loadAgreement(b: string, a: string) {
+  try {
+    const [qs, rb, ra] = await Promise.all([getQuestions(datasetId.value), getRun(b), getRun(a)])
+    if (beforeId.value !== b || afterId.value !== a) return
+    const built = buildAgreement(qs, rb.items, ra.items)
+    agree.value = built.n ? built : null
+  } catch {
+    agree.value = null
+  }
+}
+
+// immediate: при возврате на дашборд прогоны уже загружены и пара не меняется — сравнение нужно сразу
+watch([beforeId, afterId, scoreSig], ([b, a]) => void loadPair(b ?? '', a ?? ''), { immediate: true })
+
+const scoredOf = (m: RunMeta) => Object.keys(m.score?.by_type ?? {}).length > 0
+/** Графики строим и без эталона: система принята верной (её индекс = 100), «было» сверяется с ней. */
+const estimated = computed(
+  () => !!agree.value && !!pair.value && !scoredOf(pair.value.before) && !scoredOf(pair.value.after),
+)
+const viewFromAgree = (meta: RunMeta, byType: TypeBreakdown): RunView => ({
+  meta,
+  byType,
+  scored: true,
+  index: indexOfRow(sumVerdicts(byType)),
+})
+
+const before = computed<RunView>(() => {
+  const v = pair.value ? viewOf(pair.value.before) : viewOf(releaseBefore)
+  return estimated.value && !v.scored ? viewFromAgree(v.meta, agree.value!.before) : v
+})
+const after = computed<RunView>(() => {
+  const v = pair.value ? viewOf(pair.value.after) : viewOf(releaseAfter)
+  return estimated.value && !v.scored ? viewFromAgree(v.meta, agree.value!.after) : v
+})
 const isSaved = computed(() => !pair.value)
 const fmtS = (v?: number) => (typeof v === 'number' ? `${v} с` : '—')
+
+function pickGold() {
+  goldErr.value = ''
+  goldInput.value?.click()
+}
+
+/** Ответы жюри доезжают до сервера — он сам пересчитывает готовые прогоны, оценки становятся настоящими. */
+async function onGoldPicked(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || !datasetId.value) return
+  goldBusy.value = true
+  goldErr.value = ''
+  goldNote.value = ''
+  try {
+    const r = await uploadGold(datasetId.value, file)
+    goldNote.value = `эталон ${r.gold} из ${r.questions} вопросов · пересчитано прогонов: ${r.rescored.length}`
+    await refresh()
+  } catch (err) {
+    goldErr.value = err instanceof ApiError ? err.message : 'не удалось загрузить ответы'
+  } finally {
+    goldBusy.value = false
+  }
+}
 
 const types = computed<string[]>(() => {
   const both = new Set([...Object.keys(before.value.byType), ...Object.keys(after.value.byType)])
@@ -253,6 +324,32 @@ function downloadCurrent() {
       стало» появится здесь, как только запустите «Запустить проверку» в блоке прогонов
       <template v-if="datasetId"> для датасета «{{ currentDsName }}»</template>.
     </p>
+    <template v-else-if="estimated || goldNote || goldErr">
+      <p v-if="estimated" class="dash__note dash__note--est">
+        <AppIcon name="alert" size="sm" />
+        Эталонных ответов в датасете нет. Ответы итоговой системы приняты верными — её индекс ровно
+        100, а графики по закупкам показывают, насколько ответы «как есть» с ними совпадают.
+      </p>
+      <div class="dash__gold">
+        <button v-if="estimated" class="btn btn--primary btn--sm" type="button" :disabled="goldBusy" @click="pickGold">
+          <AppIcon name="upload" size="sm" />
+          {{ goldBusy ? 'Пересчитываем…' : 'Загрузить ответы и проверить заново' }}
+        </button>
+        <span v-if="goldNote" class="dash__gold-note">
+          <AppIcon name="check" size="sm" /> {{ goldNote }}
+        </span>
+        <span v-if="goldErr" class="dash__gold-note dash__gold-note--bad">
+          <AppIcon name="alert" size="sm" /> {{ goldErr }}
+        </span>
+        <input
+          ref="goldInput"
+          type="file"
+          accept=".json,application/json"
+          class="gold-file-input"
+          @change="onGoldPicked"
+        />
+      </div>
+    </template>
 
     <div class="dash">
       <!-- 1. Числовой индекс -->
@@ -307,10 +404,17 @@ function downloadCurrent() {
       </section>
 
       <!-- 2. Линейный график было/стало -->
-      <section class="card panel reveal reveal-2" aria-label="Индекс доверия по типам вопросов">
-        <h2>Индекс доверия по типам вопросов</h2>
+      <section class="card panel reveal reveal-2" :aria-label="estimated ? 'Индекс доверия по закупкам' : 'Индекс доверия по типам вопросов'">
+        <h2>{{ estimated ? 'Индекс доверия по закупкам' : 'Индекс доверия по типам вопросов' }}</h2>
         <p class="muted chart-sub">
-          Пунктир — как отвечала модель «как есть». Сплошная линия — после проверок.
+          <template v-if="estimated">
+            Пунктир — ответы «как есть», насколько они совпадают с итоговой системой. Сплошная линия —
+            сама система: её ответы приняты верными, поэтому она и 100. Ось — закупки, типов вопросов
+            без эталона не видно.
+          </template>
+          <template v-else>
+            Пунктир — как отвечала модель «как есть». Сплошная линия — после проверок.
+          </template>
         </p>
         <BeforeAfterChart
           v-if="chartsReady"
@@ -320,20 +424,27 @@ function downloadCurrent() {
           :legend-labels="lineLegend"
         />
         <p v-else class="panel__empty muted">
-          Разбивка по типам доступна для прогонов с эталонными ответами.
+          Разбивка появится, когда прогон «было» и прогон «стало» ответят на одни и те же вопросы.
         </p>
       </section>
 
       <!-- 3. Гистограмма по типам вопросов -->
-      <section class="card panel reveal reveal-3" aria-label="Вердикты по типам вопросов">
-        <h2>Где именно обманывал ИИ</h2>
+      <section class="card panel reveal reveal-3" :aria-label="estimated ? 'Совпадение с системой по закупкам' : 'Вердикты по типам вопросов'">
+        <h2>{{ estimated ? 'Где «как есть» расходился с системой' : 'Где именно обманывал ИИ' }}</h2>
         <p class="muted chart-sub">
-          Столбик — все вопросы типа, цифра сверху — их количество. Красный сегмент там, где система
-          была уверена и неправа.
+          <template v-if="estimated">
+            Столбик — все вопросы закупки относительно итоговой системы. Красный сегмент — ответы «как
+            есть», которые разошлись с системой (она ответила иначе).
+          </template>
+          <template v-else>
+            Столбик — все вопросы типа, цифра сверху — их количество. Красный сегмент там, где система
+            была уверена и неправа.
+          </template>
         </p>
         <TypeHistogram v-if="chartsReady" :labels="labels" :counts="histogram" :legend-labels="barLegend" />
         <p v-else class="panel__empty muted">
-          Те же причины, что у графика выше: без оценки нечего раскладывать по типам.
+          Те же причины, что у графика выше: нечего раскладывать, пока оба прогона не ответили на
+          вопросы.
         </p>
       </section>
 
@@ -428,6 +539,36 @@ function downloadCurrent() {
 }
 
 .dash__note--bad {
+  color: var(--bad);
+}
+
+.dash__note--est {
+  color: var(--warn);
+  margin-bottom: var(--s-3);
+}
+
+.dash__gold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-4);
+}
+
+/* Скрытый input: диалог открывает красивая кнопка выше, нативный «Выберите файл» показывать не надо. */
+.gold-file-input {
+  display: none;
+}
+
+.dash__gold-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ok);
+}
+
+.dash__gold-note--bad {
   color: var(--bad);
 }
 
