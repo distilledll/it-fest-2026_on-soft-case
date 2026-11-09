@@ -10,7 +10,7 @@ export interface LadderStart {
   dataset: string
   /** Переопределение моделей по ролям; пусто — берём реестр с настроек. */
   roles?: Record<string, string>
-  /** Шаги лесенки; пусто — все четыре слоя. Для «было → стало» хватает ['baseline', 'full']. */
+  /** Шаги лесенки; пусто — все четыре слоя. Для «было → стало» хватает ['baseline', 'hybrid']. */
   steps?: string[]
 }
 

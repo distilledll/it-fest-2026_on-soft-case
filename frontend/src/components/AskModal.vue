@@ -73,7 +73,8 @@ function runMode(mode: Mode) {
       package: packageId.value,
       question: question.value.trim(),
       pipeline: mode,
-      guard: true,
+      // «было» — модель как есть, без финальной проверки (как в лесенке); иначе baseline выглядит лучше, чем есть
+      guard: mode !== 'baseline',
     },
     {
       onStep: (s) => v.steps.push(s),

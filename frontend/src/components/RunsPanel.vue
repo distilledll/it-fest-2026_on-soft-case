@@ -55,14 +55,14 @@ const ladderPct = computed(() => {
   const settled = ladderRuns.value.filter((r) => r.status !== 'running').length
   return Math.round((Math.min(settled, ladderTotal) / ladderTotal) * 100)
 })
-/** Два шага лесенки по порядку: «было» (baseline) и «стало» (полный агент). */
+/** Два шага лесенки по порядку: «было» (baseline) и «стало» (hybrid — то, что сдаём). */
 const LADDER_LABELS: Record<string, string> = {
   baseline: 'Было · один запрос, всё скопом',
-  full: 'Стало · полный агент с проверками',
+  hybrid: 'Стало · агент с проверками и резервным проходом',
 }
 const ladderSteps = computed(() => {
   const byStep = new Map(ladderRuns.value.map((r) => [r.ladder?.step, r]))
-  return (['baseline', 'full'] as const).map((step) => ({
+  return (['baseline', 'hybrid'] as const).map((step) => ({
     step,
     title: LADDER_LABELS[step] ?? step,
     run: byStep.get(step) ?? null,
@@ -215,7 +215,7 @@ onBeforeUnmount(() => clearInterval(tick))
           {{ bothBusy ? 'Запускаем…' : ladderRunning ? 'Идёт измерение…' : 'Прогнать «было → стало»' }}
         </button>
         <span class="field__hint">
-          Один запуск — два прогона по очереди на одном датасете: «как есть» и полный агент.
+          Один запуск — два прогона по очереди на одном датасете: «как есть» и итоговая система (агент с проверками и резервным проходом).
         </span>
       </div>
     </div>
