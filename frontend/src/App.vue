@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '@/components/AppIcon.vue'
 import AskModal from '@/components/AskModal.vue'
+import DocumentModal from '@/components/DocumentModal.vue'
 import HelpTooltip from '@/components/HelpTooltip.vue'
 import { useTheme } from '@/composables/useTheme'
 
@@ -51,6 +52,7 @@ function goBack(): void {
     </RouterLink>
 
     <AskModal />
+    <DocumentModal />
   </div>
 </template>
 

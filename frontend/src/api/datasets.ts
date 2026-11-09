@@ -1,5 +1,5 @@
 import { deleteRequest, getJson, sendFiles, type SendProgress } from './http'
-import type { DatasetDetail, DatasetInfo, QuestionRow } from '@/types'
+import type { DatasetDetail, DatasetInfo, DocumentFull, QuestionRow } from '@/types'
 
 export const listDatasets = () => getJson<DatasetInfo[]>('/datasets')
 
@@ -8,6 +8,12 @@ export const getDataset = (id: string) =>
 
 export const getQuestions = (id: string) =>
   getJson<QuestionRow[]>(`/datasets/${encodeURIComponent(id)}/questions`)
+
+/** Полный текст документа — для подсветки цитаты-основания. */
+export const getDocument = (id: string, pack: string, file: string) =>
+  getJson<DocumentFull>(
+    `/datasets/${encodeURIComponent(id)}/packages/${encodeURIComponent(pack)}/files/${encodeURIComponent(file)}`,
+  )
 
 export const deleteDataset = (id: string) => deleteRequest(`/datasets/${encodeURIComponent(id)}`)
 

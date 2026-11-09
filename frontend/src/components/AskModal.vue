@@ -7,11 +7,13 @@ import { listDatasets } from '@/api/datasets'
 import { ApiError, isCanceled } from '@/api/http'
 import { useAskModal } from '@/composables/useAskModal'
 import { useDataset } from '@/composables/useDataset'
+import { useDocViewer } from '@/composables/useDocViewer'
 import type { Answer, DatasetInfo, TraceStep } from '@/types'
 import { plural, statusMeta } from '@/utils/presentation'
 
 const { open, preset, hide } = useAskModal()
 const { active } = useDataset()
+const docViewer = useDocViewer()
 
 const datasets = ref<DatasetInfo[]>([])
 const datasetId = ref('')
@@ -29,6 +31,12 @@ const sources = computed(() => {
   }
   return all
 })
+
+/** Открыть оригинал документа поверх модалки и подсветить цитату-основание. */
+function openDoc(source: { file: string; quote: string }) {
+  if (!source.file) return
+  docViewer.show({ dataset: datasetId.value, package: packageId.value, file: source.file, quote: source.quote })
+}
 
 type Mode = 'baseline' | 'agent'
 
@@ -264,7 +272,10 @@ onUnmounted(() => {
             <blockquote v-for="(source, i) in sources" :key="i" class="answer__quote">
               <strong v-if="sources.length > 1 && source.value && source.quote.includes(source.value)">{{ source.value }}<br></strong>
               «{{ source.quote }}»
-              <cite v-if="source.file" class="answer__file mono">{{ packageId }}/{{ source.file }}</cite>
+              <cite v-if="source.file" class="answer__file mono">
+                {{ packageId }}/{{ source.file }}
+                <button type="button" class="answer__doclink" @click="openDoc(source)">Показать в документе</button>
+              </cite>
             </blockquote>
           </div>
         </transition>
@@ -440,6 +451,22 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-faint);
   font-style: normal;
+}
+
+.answer__doclink {
+  margin-inline-start: var(--s-2);
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.answer__doclink:hover {
+  text-decoration: none;
 }
 
 @keyframes step-in {

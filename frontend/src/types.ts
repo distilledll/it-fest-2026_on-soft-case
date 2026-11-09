@@ -355,3 +355,8 @@ export interface QuestionRow {
   package: string
   question: string
 }
+
+/** GET /api/datasets/{did}/packages/{package}/files/{file} — полный текст документа. */
+export interface DocumentFull extends DatasetFile {
+  text: string
+}
