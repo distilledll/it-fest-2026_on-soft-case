@@ -63,6 +63,12 @@ function build() {
     },
   }
 
+  /* Потолок оси Y: суммарный столбик + запас, округлённый до «красивого» шага
+     (45 → 50). Иначе подпись суммы над самым высоким столбиком залезает в легенду. */
+  const stackMax = Math.max(0, ...props.labels.map((_, i) => SERIES.reduce((s, k) => s + (props.counts[k.key][i] ?? 0), 0)))
+  const step = stackMax <= 10 ? 2 : stackMax <= 50 ? 10 : stackMax <= 100 ? 20 : Math.ceil(stackMax / 50) * 10
+  const axisMax = stackMax <= 0 ? undefined : Math.ceil((stackMax * 1.1) / step) * step
+
   const config: ChartConfiguration<'bar'> = {
     type: 'bar',
     data: {
@@ -117,6 +123,8 @@ function build() {
         },
         y: {
           stacked: true,
+          beginAtZero: true,
+          ...(axisMax ? { max: axisMax } : {}),
           border: { display: false },
           ticks: { precision: 0, padding: 8, color: p.muted },
           grid: { color: p.grid },
