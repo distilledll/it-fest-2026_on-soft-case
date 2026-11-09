@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import { useAuth } from '@/composables/useAuth'
+import CaughtView from '@/views/CaughtView.vue'
 import DashboardView from '@/views/DashboardView.vue'
 import HomeView from '@/views/HomeView.vue'
 import LoginView from '@/views/LoginView.vue'
@@ -13,6 +14,7 @@ const router = createRouter({
     { path: '/login', name: 'login', component: LoginView, meta: { bare: true, title: 'Вход' } },
     { path: '/', name: 'home', component: HomeView, meta: { title: 'Главная' } },
     { path: '/dashboard', name: 'dashboard', component: DashboardView, meta: { title: 'Дашборд' } },
+    { path: '/run/:runId/caught', name: 'caught', component: CaughtView, meta: { title: 'Пойманные обманы' } },
     { path: '/upload', name: 'upload', component: UploadView, meta: { title: 'Загрузка данных' } },
     { path: '/settings', name: 'settings', component: SettingsView, meta: { title: 'Настройки' } },
     { path: '/:pathMatch(.*)*', redirect: '/' },

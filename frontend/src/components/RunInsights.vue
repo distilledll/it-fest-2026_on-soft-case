@@ -55,6 +55,10 @@ watch(() => props.runId, load, { immediate: true })
           споткнулись и чем это кончилось.
         </p>
       </div>
+      <RouterLink class="btn btn--ghost btn--sm insights__caught" :to="{ name: 'caught', params: { runId } }">
+        <AppIcon name="shield" size="sm" />
+        Пойманные обманы
+      </RouterLink>
     </div>
 
     <p v-if="error" class="callout callout--bad">
@@ -138,6 +142,10 @@ watch(() => props.runId, load, { immediate: true })
 
 <style scoped>
 .insights__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
   margin-bottom: var(--s-4);
 }
 

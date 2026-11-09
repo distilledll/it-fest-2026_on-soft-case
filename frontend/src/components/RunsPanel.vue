@@ -363,6 +363,12 @@ onBeforeUnmount(() => clearInterval(tick))
           <span v-if="r.llm_calls !== undefined">{{ r.llm_calls }} запросов к модели</span>
           <span v-if="r.elapsed_s !== undefined">{{ r.elapsed_s }} с</span>
           <span>{{ shortTime(r.created_at) }}</span>
+          <RouterLink
+            v-if="r.status === 'done' && r.guard"
+            :to="{ name: 'caught', params: { runId: r.run_id } }"
+          >
+            Пойманные обманы
+          </RouterLink>
           <a v-if="r.status === 'done'" :href="answersCsvUrl(r.run_id)" download>Скачать answers.csv</a>
         </div>
 

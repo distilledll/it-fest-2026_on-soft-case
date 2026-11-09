@@ -204,6 +204,42 @@ export interface Insights {
   events: InsightEvent[]
 }
 
+/** GET /api/runs/{id}/caught — экран «как система поймала обман». */
+export interface CaughtAnswer {
+  status?: string | null
+  answer?: string | null
+  quote?: string | null
+  file?: string | null
+}
+
+export interface CaughtRow {
+  id: string
+  type: string
+  question: string
+  draft: CaughtAnswer
+  draft_verdict: string
+  draft_why?: string
+  final: CaughtAnswer
+  final_verdict: string
+  critics: string[]
+  steps: TraceStep[]
+}
+
+export interface CriticStats {
+  fired: number
+  caught: number
+  false_alarm: number
+}
+
+export interface Caught {
+  run_id: string
+  label?: string | null
+  has_gold: boolean
+  caught: CaughtRow[]
+  false_alarms: CaughtRow[]
+  per_critic: Record<string, CriticStats>
+}
+
 export interface TypeBreakdown {
   /** тип вопроса -> вердикт -> количество */
   [type: string]: Record<Verdict, number>
